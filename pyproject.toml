@@ -5,8 +5,11 @@ description = "Decomposes complex tasks into a DAG of steps, runs them on specia
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.20.1",
+    "asyncpg>=0.32.0",
     "fastapi>=0.162.5",
     "pydantic-settings>=2.16.2",
+    "sqlalchemy[asyncio]>=2.1.8",
     "uvicorn[standard]>=0.54.0",
 ]
 
@@ -32,7 +35,7 @@ select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-mypy_path = "src"
+mypy_path = ["src", "tests"]
 packages = ["orchestrator"]
 
 [dependency-groups]

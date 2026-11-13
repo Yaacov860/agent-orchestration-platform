@@ -8,7 +8,8 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY README.md ./
+COPY README.md alembic.ini ./
+COPY migrations ./migrations
 COPY src ./src
 RUN uv sync --frozen --no-dev
 
@@ -20,4 +21,6 @@ COPY --from=builder --chown=app:app /app /app
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 USER app
 EXPOSE 8000
-CMD ["uvicorn", "orchestrator.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Migrate, then hand the process over to uvicorn (exec) so it receives SIGTERM directly.
+# Fine for one instance; with several replicas, migrations belong in a separate deploy step.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn orchestrator.main:app --host 0.0.0.0 --port 8000"]
