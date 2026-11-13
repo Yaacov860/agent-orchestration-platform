@@ -1,0 +1,104 @@
+import json
+import logging
+import time
+from abc import ABC, abstractmethod
+from typing import ClassVar, Literal
+
+from orchestrator.agents.types import AgentOutput, AgentResult, AgentTask, ErrorInfo
+from orchestrator.llm import LLMClient, LLMError, LLMRequest, LLMResponse, TokenUsage
+
+logger = logging.getLogger(__name__)
+
+
+class UnsupportedActionError(Exception):
+    """The step asked an agent for an action it does not offer (a planning bug)."""
+
+
+class MeteredLLM:
+    """Wraps the LLM for ONE agent run and adds up the tokens of every call in that run.
+
+    A fresh one is created per run because a single agent instance serves many steps
+    concurrently; a token counter stored on the agent itself would mix their numbers.
+    It satisfies the LLMClient protocol, so `execute` cannot tell it from the real client.
+    """
+
+    def __init__(self, llm: LLMClient) -> None:
+        self._llm = llm
+        self.usage = TokenUsage()
+
+    async def generate(self, request: LLMRequest) -> LLMResponse:
+        response = await self._llm.generate(request)
+        self.usage = self.usage + response.usage
+        return response
+
+
+class BaseAgent(ABC):
+    """Shared run loop for every agent (Template Method pattern).
+
+    `run` is the same for all agents: check the action, time it, meter tokens, turn any
+    failure into a structured result. Subclasses only implement `execute`, the actual work.
+    """
+
+    name: ClassVar[str]
+    description: ClassVar[str]
+    capabilities: ClassVar[frozenset[str]]
+    """The actions this agent accepts; the planner may only assign these."""
+
+    def __init__(self, llm: LLMClient) -> None:
+        self._llm = llm
+
+    async def run(self, task: AgentTask) -> AgentResult:
+        started = time.perf_counter()
+        meter = MeteredLLM(self._llm)
+        error: ErrorInfo
+        try:
+            if task.action not in self.capabilities:
+                raise UnsupportedActionError(
+                    f"agent '{self.name}' does not support action '{task.action}' "
+                    f"(supported: {sorted(self.capabilities)})"
+                )
+            output = await self.execute(task, meter)
+        except LLMError as exc:
+            error = ErrorInfo(type=type(exc).__name__, message=str(exc), retryable=exc.retryable)
+        except Exception as exc:
+            # Deliberately not BaseException: asyncio.CancelledError must propagate so that
+            # cancelling a task actually stops it instead of being recorded as a step failure.
+            logger.exception("agent %s failed on step %s", self.name, task.step_id)
+            error = ErrorInfo(type=type(exc).__name__, message=str(exc), retryable=False)
+        else:
+            return self._result(task, "completed", started, meter.usage, output=output)
+        return self._result(task, "failed", started, meter.usage, error=error)
+
+    @abstractmethod
+    async def execute(self, task: AgentTask, llm: LLMClient) -> AgentOutput:
+        """Do the agent's work for one step. Raise on failure; `run` records it."""
+
+    def compose_user_prompt(self, task: AgentTask) -> str:
+        """The common frame every agent's prompt starts from: goal, constraints, inputs, step."""
+        parts = [f"## Overall goal (the user's request)\n{task.goal}"]
+        if task.constraints:
+            parts.append(f"## Constraints\n{json.dumps(task.constraints, ensure_ascii=False)}")
+        for item in task.context:
+            parts.append(f"## Input from {item.step_id} ({item.agent} agent)\n{item.content}")
+        parts.append(f"## Your step ({task.action})\n{task.instruction}")
+        return "\n\n".join(parts)
+
+    def _result(
+        self,
+        task: AgentTask,
+        status: Literal["completed", "failed"],
+        started: float,
+        usage: TokenUsage,
+        *,
+        output: AgentOutput | None = None,
+        error: ErrorInfo | None = None,
+    ) -> AgentResult:
+        return AgentResult(
+            step_id=task.step_id,
+            agent=self.name,
+            status=status,
+            output=output,
+            error=error,
+            usage=usage,
+            execution_time_ms=round((time.perf_counter() - started) * 1000),
+        )
