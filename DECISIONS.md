@@ -99,6 +99,48 @@ migration is a frozen snapshot). Its downgrade refuses while `planned` rows exis
 silently rewriting them. A test inserts every `TaskStatus` value into the migrated database, so
 an enum member added without a migration fails in CI, not in production.
 
+## 0.4 Synthesis, provenance and the final result
+
+**The model writes, code decides what a model would invent.** The model's draft is only
+`content`, `key_findings` (each with the `step_ids` it came from), `conflicts` (every side
+with its steps) and `limitations` it noticed. Strict Pydantic, unknown fields rejected.
+Code then computes:
+- `sources`: exactly the pages the steps' providers returned, each with the steps that got it.
+  The model never sees a URL in its prompt (only a count), and a draft that mentions any URL no
+  step returned is rejected.
+- `verification` per finding: `corroborated` only when it cites two steps that do not derive
+  from each other. A summary step agreeing with the step it summarized is not a second opinion,
+  and neither is a summary alone, even of several steps. `single_step` is shown as not
+  verified, and `unattributed` (an empty `step_ids`) is allowed and labelled, rather than
+  forcing the model to guess a step.
+- `confidence`: mean evidence-based step confidence x coverage (completed / all steps) x 0.8
+  if there are conflicts, with `confidence_basis` saying exactly that. With no step reporting
+  evidence, it is `null`, not a made-up number.
+- `limitations`: every failed or skipped step with its error, every output cut for the prompt,
+  "no web sources" when none came back, and the count of findings that are single-step or
+  unattributed. The model's own limitations are appended, without duplicates.
+
+**Conflicts are kept, never resolved by fiat.** The prompt asks for every side with its steps
+and forbids picking one unless the outputs settle it. Validation requires at least two
+different claims, each citing steps that have output. Conflicts lower the confidence and are
+stored and served whole. Detecting them is the model's job: no deterministic comparison of
+free text was attempted, which is a real limitation of the approach.
+
+**Invalid output is never stored.** Same pattern as planning: all problems collected, one
+repair call that shows the model its answer and the problems, then failure. A draft citing a
+failed step, an unknown step or an invented URL, or invalid JSON for `output_format: json`,
+counts as invalid.
+
+**What reaches synthesis.** Every completed step, cut to `MAX_CONTEXT_CHARS_PER_INPUT` with a
+marker. Each is labelled with its agent, action, instruction and the steps it built on, so
+both the model and the provenance code know the lineage. Failed and skipped steps are listed
+as "without output (cannot be cited)".
+
+**Separation.** `synthesis/` is pure. It imports none of planning, execution, the database or
+the services, and gets the task and step rows as plain data (`SynthesisInput`). Execution hands
+over through an injected `on_executed(task_id)` callback, as planning does with `on_planned`.
+The architecture test enforces all of it.
+
 ## 0.5 Specialized agents: writing, analysis, code
 
 **Four agents, one contract.** Research (existing), writing (`write`, `rewrite`,
@@ -142,6 +184,12 @@ that its prompt mentions no other agent. A class whose descriptions do not match
 capabilities fails when it is defined. The model's routing is then checked like everything
 else: an action given to the wrong agent is a validation problem whose message lists what that
 agent can do, so the single repair attempt can re-route it.
+
+**Synthesis keeps deliverables.** When a step already produced what the task asks for (a
+document from writing, code from code), the synthesis prompt asks to build on it rather than
+rewrite it. A URL that appears in a step's own output (an endpoint in generated code, say) may
+be quoted, since it is copied rather than invented, but it never becomes a source: `sources`
+stays provider-only.
 
 ## 1. Task Decomposition Strategy
 
