@@ -642,3 +642,44 @@ starting up would fail plans another is still computing (a heartbeat or lease co
 that). Rescheduling `pending` is safe with any number of processes.
 
 ## 5. One Thing I Would Do Differently With More Time
+
+**Run the pipeline on a durable job queue with leases, instead of in-process asyncio jobs.**
+
+**What was built.** Planning, execution and synthesis run as asyncio jobs inside the API
+process (`BackgroundRunner`). They coordinate only through PostgreSQL status columns,
+changed by conditional UPDATEs (0, 0.3, 4). That was the right size for this project: one
+process, network-bound LLM calls, no broker to operate. Every state change is still durable
+and safe against races.
+
+**What it costs.** All of this is already documented above:
+- A restart cannot resume work. A task left `planning` or `executing` is failed as
+  "interrupted". Only `pending`, `planned` and `synthesizing` tasks are picked up again (4).
+- Startup recovery assumes a single API process. With two replicas, one starting up would
+  fail plans that the other is still computing (4, "Limits").
+- Every limit is per process:
+  - the concurrency caps (3);
+  - the grounded-call budget, kept in memory for one task execution (0.8);
+  - uptime and readiness (0.7).
+- A synthesis that crashes the process would be retried on every start (4).
+
+**What I would do instead.** Each stage's job would get a row with an owner and a lease
+(`claimed_by`, `lease_until`), renewed by a heartbeat while the job runs.
+- Workers, in the API process or in separate processes, would claim jobs with
+  `SELECT … FOR UPDATE SKIP LOCKED`.
+- A crashed worker's lease would expire, and another worker would take the job over.
+- Retrying is already safe: every transition is a compare-and-set, and a result is stored
+  once (0.4).
+- Execution would resume from the next group instead of failing, because completed steps
+  are already stored.
+- The grounded-call budget would be stored with the task, so a resumed execution would not
+  get a fresh one.
+
+**Why this one.** No other decision has limits that show up in as many sections of this
+document. Fixing it changes the failure model from "fail and say why" to "resume". It adds
+no new feature.
+
+**Also not done.**
+- Result quality was not evaluated. It was read by eye on a few tasks (AI_USAGE.md).
+- There is no CI: the test suite and the Docker smoke test run only by hand.
+- Google Search grounding was verified live on one task with a budget of 1. It was not
+  verified with corroborating steps.

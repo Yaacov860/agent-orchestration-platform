@@ -1,13 +1,32 @@
 # AI Tool Usage
 
-Two different things are documented here: how the **system** uses an LLM (and how tests replace
-it), and how an **AI coding assistant** was used to build it. The second part currently covers
-stage 3 (planner and its integration), the execution engine and the synthesis engine.
+Two different things are documented here: how the **system** uses an LLM (and how tests
+replace it), and how an **AI coding assistant** was used to build it. The second part covers
+the whole project, stage by stage:
 
-> **To review (author):** sections marked _[author to confirm]_ state judgements or reflect a
-> way of working as seen from the assistant's side of the sessions. They need your
-> confirmation, or your own words, before this is submitted. Earlier stages (0 to 0.2) are not
-> covered and need to be added by you.
+| Stage | What was built | Now in |
+|---|---|---|
+| 0 | Project skeleton: health endpoint, Docker, tooling | `main` |
+| 0.1 | LLM client contract, FakeLLM, BaseAgent, ResearchAgent | `main` |
+| 0.2 | Task data model, first migration, `POST /tasks`, `GET /tasks/{id}` | `main` |
+| 3 | Planner: `planned` status, dependency graph, plan validation, LLM planner, planning service, background runner | PR1, PR3, PR4, PR7 |
+| Hardening | Startup recovery (reschedule `pending`, fail interrupted `planning`), no planning twice, edge-case tests, this document's account of LLM use | PR7, PR8 |
+| Execution engine | Group-by-group executor, concurrency cap, retries, cancellation; then `/steps`, input-size limit, `Settings` limits, deadlines | PR4, PR6, PR7, PR8 |
+| Synthesis engine | Provenance, draft validation, synthesizer, synthesis service, `/result` | PR5, PR7, PR8 |
+| Specialized agents | Writing, analysis and code agents; agent catalog and factory | PR2 |
+| Gemini provider | `GeminiLLM`, provider factory, settings | PR6 |
+| Readiness | Gemini failures diagnosed and fixed against the real API; first real end-to-end runs; `GET /agents`, trace, token usage, `/metrics`, `/health/ready` | PR1, PR6, PR8 |
+| PR split | The finished work organized into 8 reviewable PRs, after the fact; the stack's tree is identical to the working version | - |
+| Final validation | Docker build and Compose: the `httpx` runtime dependency fixed, a Docker smoke test added; a paid live run with grounding off | PR6, PR8 |
+| Publication fixes | Compose forwards every documented setting; documentation updated | PR6, PR8 |
+| PR9 | Bounded Google Search grounding; a live run with grounding on | PR9 |
+
+**Who did what.** Claude wrote the code, the tests and the documentation in every stage,
+stages 0–0.2 included. The author wrote no code. The author:
+- gave the instructions for each unit and set its scope and constraints;
+- decided the questions that were raised along the way;
+- approved each plan before work started;
+- approved every commit and every paid live run.
 
 ## How the system uses an LLM
 
@@ -86,10 +105,14 @@ output: no citing a failed or unknown step, and no URL that no step returned. So
 taken from the model. The user's goal and the step outputs are fenced in prompts as data, but
 validation is the real guard.
 
-**What has not been verified.** No prompt (planner, research, writing, analysis, code,
-synthesis) has been run against a real model. In particular, whether a real planner routes
-steps to the right agents is untested: the tests check that the descriptions reach it and that
-wrong routing is caught and sent back, not the model's choices. The tests prove the logic around the model (parsing, validation, repair, retries,
+**What has not been verified.** Every prompt has run against the real model in the
+end-to-end tasks listed above: the planner, research, writing, analysis, code and synthesis.
+None of them has been evaluated: their results were read by eye on a few tasks.
+- **Agent routing.** The tests check that the agent descriptions reach the planner, and that
+  wrong routing is caught and sent back. They do not check the model's choices. In the live
+  runs, the planner's plans used the research, analysis, writing and code agents. That is an
+  observation, not an evaluation.
+- **What the tests prove.** The tests prove the logic around the model (parsing, validation, repair, retries,
 provenance, storage), not the quality of what a real model would produce. In particular,
 conflict detection relies on the model noticing disagreements: the tests check that reported
 conflicts are kept whole and validated, not that a real model finds them.
@@ -116,30 +139,52 @@ an exception, and every request is recorded.
 
 ## Tools I Used
 
-- **Claude Code** (VS Code extension), model Claude Opus 5.5, for stage 3, the execution and
-  synthesis engines, the specialized agents and the Gemini provider: design proposals,
-  implementation, tests and documentation.
-- Way of working: environment checks first (read-only), then a written plan per unit, approved
-  before any code. Commits and pushes only on explicit approval. Each unit ended with the full
-  suite, `ruff` and `mypy --strict`.
+- **Stages 0–0.2:** Claude, model Claude Opus 5.5, wrote the code from the author's
+  instructions. The commits carry a `Co-Authored-By: Claude Opus 5.5` trailer.
+- **Stage 3 through PR9:** Claude Code (VS Code extension), model Claude Opus 5.5. It was used
+  for design proposals, implementation, tests, documentation, the after-the-fact PR split,
+  and the validation runs: Docker, Compose, coverage and live API.
+- **How the work was done:**
+  - Environment checks first, read-only.
+  - A written plan per unit, approved before any code.
+  - Commits only on approval, and no push without approval.
+  - Live API runs only on explicit approval, one task at a time, with the key never printed.
+  - Each unit ended with the full suite, `ruff` and `mypy --strict`.
 
-## What Helped Most _[author to confirm]_
+## What Helped Most
 
-- **Plan before code, with decisions surfaced as questions.** Choices with real trade-offs went
-  back to the author instead of being made silently: a separate `planned` status (migration) versus
-  reusing `planning`, a catalog limited to implemented agents, failing clearly when no provider
-  is configured, and what startup recovery does to each status.
-- **Mutation checks on green tests.** When new tests passed on the first run, a deliberate bug was
-  planted to confirm a test catches it, then removed. Examples: allowing a third planner attempt,
-  making status transitions unconditional, storing a plan for a task that already failed,
-  removing the concurrency cap. Every planted bug was caught.
-- **Deterministic tests for background work.** A `ManualRunner` that only records jobs removed the
-  race between `POST /tasks` and the planner in API tests, with one end-to-end test on the real
-  runner.
+- **A plan before code, with decisions surfaced as questions.** Choices with real trade-offs
+  went back to the author instead of being made silently. Examples: a separate `planned`
+  status versus reusing `planning`; a catalog limited to implemented agents; failing clearly
+  when no provider is configured; what startup recovery does to each status; and, in PR9,
+  whether search should be capped on requests or on queries.
+- **Mutation checks on green tests.** When new tests passed on the first run, a deliberate
+  bug was planted to confirm that a test catches it, then removed. Examples: allowing a
+  third planner attempt, making status transitions unconditional, storing a plan for a task
+  that already failed, removing the concurrency cap. Every planted bug was caught.
+- **Deterministic tests for background work.** A `ManualRunner` that only records jobs
+  removed the race between `POST /tasks` and the planner in API tests. One end-to-end test
+  runs on the real runner.
+- **The real API, early and cheaply.** Running against Gemini overturned four assumptions
+  that offline tests could not (listed under "Assumptions the real API overturned" below).
+  Live runs stayed small:
+  - metadata-only model checks before a run;
+  - tasks submitted one at a time;
+  - one task for each paid run;
+  - a grounded-call budget of 1 for the grounding run.
+- **Checking against a reference instead of trusting a summary.**
+  - The PR split was accepted only when the stack's tree hash equalled the working version's.
+  - The Compose defaults were compared, value by value, with `Settings`.
+  - Coverage of the PR1/PR2 code was measured, not inferred.
+- **Testing the shipped artefact.** Building and running the Docker image found a missing
+  runtime dependency that 541 green tests could not see. The smoke test written for it fails
+  on the code before the fix.
 
-## What I Had to Fix _[author to confirm the framing: these were caught by the checks and by review within the sessions]_
+## What I Had to Fix
 
-Problems in AI-written code or tests, caught during review or by the checks:
+Problems in Claude-written code, tests, configuration or documentation. Each was caught by
+the checks or by review within the sessions, then fixed by Claude and covered by a test (or,
+for configuration, by a script check):
 
 - **Cycle detection skipped a broken graph.** The first validation ran the cycle check only when
   there were no other dependency problems. With a single repair attempt, the model would fix the
@@ -225,12 +270,38 @@ Problems in AI-written code or tests, caught during review or by the checks:
   is now a runtime dependency (the same 0.28.1 in `uv.lock`), and `scripts/docker_smoke.sh`
   checks that the container starts and answers `GET /health` with 200. It was run on the code
   before the fix and failed with the same error.
+- **Documented settings that Docker ignored.** The README documented
+  `GEMINI_SEARCH_GROUNDING`, `GEMINI_FALLBACK_MODELS`, the Gemini timeout and the execution
+  limits as environment settings. `docker compose up` forwarded only `LLM_PROVIDER`,
+  `GEMINI_API_KEY` and `GEMINI_MODEL`. Found when the first live run needed an override file
+  just to turn grounding off. Compose now forwards every documented setting, and its
+  defaults were compared value by value with `Settings`.
 
-## What AI Struggled With _[author to confirm]_
+## What AI Struggled With
 
-- **Interactions between parts:** each check in validation was right on its own; the bug was how
-  the cycle check combined with the one-repair rule in the planner.
-- **Trusting its own green tests:** tests passing on the first run said little until a planted
-  bug showed they could fail.
-- **Tooling side effects:** the formatter rewrote lines between writing code and scripting
-  against its exact text.
+- **Interactions between parts.** Each check in plan validation was right on its own; the
+  bug was how the cycle check combined with the planner's one-repair rule.
+- **Trusting its own green tests.** Tests that passed on the first run said little until a
+  planted bug showed they could fail.
+- **The gap between the development environment and the shipped image.** The suite ran in
+  an environment that had `httpx`. The image, installed without dev dependencies, did not.
+  This was found only when the image built from the final code was started, in the Docker
+  validation.
+- **Documentation drifting from configuration.** Settings were documented as configurable
+  while the Docker path ignored them. Each was right where it was written; the gap showed
+  only when the two were used together.
+- **Precision in its own reports.**
+  - A summary gave the test count on `main` as 59. It was 51; corrected in the next report.
+  - A first coverage check counted calls by name, which matched unrelated methods such as
+    `session.add`. It was replaced by an AST analysis and a measured coverage run.
+- **Tooling side effects.**
+  - The formatter rewrote lines between writing code and scripting against its exact text.
+  - zsh expanded `=` inside an `echo`.
+  - macOS's system Python (3.9) rejected f-string syntax that the project's Python (3.12)
+    accepts. It broke a status-polling loop during the paid grounding run: the task had
+    been sent once and the loop only read status, so there was no extra cost.
+  - A failed `git stash` in a throwaway worktree let the next command overwrite files there.
+    No branch was affected.
+- **A library newer than its training data.** google-genai 3.3.0 had to be read from its
+  installed source (error classes, timeout units, retries, how the key is sent) rather than
+  recalled.
