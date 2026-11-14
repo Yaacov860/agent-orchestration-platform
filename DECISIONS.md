@@ -191,6 +191,103 @@ rewrite it. A URL that appears in a step's own output (an endpoint in generated 
 be quoted, since it is copied rather than invented, but it never becomes a source: `sources`
 stays provider-only.
 
+## 0.6 The Gemini provider
+
+**One adapter behind the existing contract.** `GeminiLLM` implements `LLMClient.generate`
+exactly, and nothing outside `llm/` changed. The planner, the four agents and synthesis all
+use the one instance `create_app` builds, each still metered per call by `MeteredLLM`.
+`build_llm(settings)` is the only place that knows providers. The SDK is imported only when
+Gemini is actually configured.
+
+**Request mapping.** `system_prompt` becomes `system_instruction`, `user_prompt` the contents,
+and `temperature` and `max_output_tokens` pass through. `use_search` adds the Google Search
+grounding tool, and only research asks for it.
+
+**Response mapping.**
+- Text is the first candidate's parts, without thought parts.
+- Usage is `prompt_token_count` in, and `candidates_token_count + thoughts_token_count` out,
+  since thinking is billed as output. When the provider reports no usage it counts as zero,
+  not as an error.
+- Sources are the grounding chunks' web pages (URI and title), exactly as the provider
+  reports them.
+
+**One retry layer, not two.** The SDK would retry 408/429/5xx itself. It is configured with
+`attempts=1`, so retries happen only in the stage that owns the policy (planning, the step
+executor, synthesis). Otherwise one step could make up to 5 x 3 calls. The SDK timeout
+(milliseconds, per HTTP call) is `GEMINI_TIMEOUT_SECONDS`, 60 s by default, under the 180 s
+step timeout: a hung call ends as a provider timeout, which the stage retries, before the
+step timeout would have to stop it.
+
+**Error mapping and retryability.**
+
+| What Gemini did | Mapped to | Retried |
+|---|---|---|
+| 401, 403, or 400 "API key not valid" | `LLMPermanentError` ("check GEMINI_API_KEY") | no |
+| 404 (model not found) | `LLMPermanentError` ("check GEMINI_MODEL") | no |
+| other 4xx (bad request) | `LLMPermanentError` | no |
+| 429 with a per-day `quotaId` (the model's daily quota is used up) | next model; if none is left, `LLMPermanentError` with the reset time | no |
+| other 429 (per-minute limit, or grounding quota) | next model; if none is left, `LLMTransientError` with the provider's `retryDelay` | yes, after that delay (60 s cap) |
+| 503, 504 (overloaded) | next model; if none is left, `LLMTransientError` | yes |
+| 408, 499, other 5xx | `LLMTransientError` | yes |
+| network error, HTTP timeout (`httpx` or `httpx2`) | `LLMTransientError` | yes |
+| blocked prompt, or stopped for safety / recitation / blocklist / prohibited content / SPII / language | `LLMPermanentError` | no |
+| no candidates, empty answer, unparseable response | `LLMTransientError` | yes |
+| `MAX_TOKENS` with no text at all | `LLMPermanentError` (the same budget runs out the same way) | no |
+| `MAX_TOKENS` with some text | returned as-is; JSON callers' validation catches the cut | (repair) |
+
+**What the real API taught (2026-11-14, a free-tier key).** Every rule above about 429, 503,
+504 and timeouts was revised after real responses, not designed up front.
+- **The 429 text is identical** for a per-minute limit, a used-up daily quota and a missing
+  grounding quota ("You exceeded your current quota, please check your plan and billing
+  details"). A first version made it permanent on that text. A minute later the same plain
+  requests succeeded, so that was wrong, and it failed three end-to-end tasks without a
+  retry. The structured details tell the cases apart: `QuotaFailure.quotaId`
+  (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`) and `RetryInfo.retryDelay`
+  (`52691s` for the daily one).
+- **Quotas and load are per model.** `gemini-3.8-flash` was out of its daily quota and
+  overloaded (503) while `gemini-3.6-flash` and `gemini-3.5-flash-lite` answered, so a call
+  moves to the next of `GEMINI_FALLBACK_MODELS` on 429, 503 or 504. In the successful
+  end-to-end run, 25 calls fell back.
+- **Waiting.** A stage's own retry delays (1 to 5 s) are far shorter than a per-minute
+  window. Every stage now waits `max(its delay, the provider's retryDelay)`, capped at 60 s,
+  within the deadline.
+- **Two transports.** The SDK sends through `httpx2`, a separate package whose exceptions do
+  not inherit from httpx's. A real read timeout escaped unmapped and was recorded as an
+  internal error. Both families are mapped now.
+- **Grounding.** Google Search grounding returned 429 instantly on every model while plain
+  requests worked: this key has no grounding quota. `GEMINI_SEARCH_GROUNDING=false` lets such
+  an account run, with results that have no sources, low confidence, and say so.
+- **Research without search.** Told to "use web search" with no search tool, the model wrote a
+  tool call as its answer (`fn:authoritative_search(query="...")`), and the writing step built
+  on nothing. The research prompt now covers running without search. A tool-call-only answer
+  is an `InvalidAgentOutputError`, which is retried. The model did not add the "Unverified"
+  line the prompt asks for, so transparency rests on the code-side limitation ("No step
+  returned web sources") and the 0.3 confidence, not on the model.
+
+**The key stays secret.** It is a `SecretStr` in `Settings`, so repr and dumps mask it. It goes
+to the SDK only, which sends it in the `x-goog-api-key` header, not in the URL (checked in the
+SDK source). Error text is built from status and message only, scrubbed of the key, cut to
+300 characters, and raised `from None` so the SDK exception's payload is not chained into
+logs. Tests check every one of these.
+
+**Model choice: `gemini-3.8-flash` (configurable with `GEMINI_MODEL`).** A fast text model with
+Google Search grounding. Flash rather than Pro because one task makes many calls (planner,
+every step, synthesis), so latency and cost dominate. It is the model the official SDK's
+README (google-genai 3.3.0) uses for text and search grounding. The live API backs it: the key's
+model list includes it, and a request to `gemini-2.5-flash` was refused as "no longer
+available to new users", with `gemini-3.8-flash` named as the replacement. No successful
+generation has been observed yet (503 and 504 under high demand, 429 on grounding quota): see
+AI_USAGE.md.
+
+**Hold the SDK client, not just its models.** The SDK `Client` closes its HTTP connection when
+it is garbage-collected. `GeminiLLM` keeps the client itself for its whole life. A regression
+test forces a collection on a running loop and checks the connection is still open.
+
+**Tests can never reach Gemini by accident.** An autouse fixture sets `GEMINI_API_KEY` (and
+`GOOGLE_API_KEY`) to empty for every test not marked `live`. An empty variable wins over a key
+in `.env`; this was checked, not assumed. Live tests are opt-in, skip with a reason without a
+key, and the end-to-end script runs against a deployed API rather than inside the test suite.
+
 ## 1. Task Decomposition Strategy
 
 **The model proposes, the code decides.** The planner asks the LLM for a JSON plan; nothing it

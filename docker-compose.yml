@@ -5,7 +5,10 @@ services:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@postgres:5432/orchestrator
-      LLM_PROVIDER: ${LLM_PROVIDER:-fake}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      # From your shell or a local .env (never committed). Empty: the API runs, tasks fail clearly.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
     depends_on:
       postgres:
         condition: service_healthy

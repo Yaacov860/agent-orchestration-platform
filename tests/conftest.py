@@ -55,6 +55,28 @@ async def recreate_database(database_url: str) -> None:
         await admin.dispose()
 
 
+def _live_key() -> str:
+    key = Settings().gemini_api_key  # the environment, then .env: as the app would see it
+    return key.get_secret_value() if key is not None else ""
+
+
+LIVE_GEMINI_API_KEY = _live_key()
+"""Read once, at import, before the fixture below blanks it: only tests marked `live` may use
+it (tests/live). Never printed: test ids and skip reasons do not contain it."""
+
+
+@pytest.fixture(autouse=True)
+def no_real_llm_unless_live(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No test reaches a real model by accident. An empty environment variable wins over a
+    key in .env (pydantic-settings reads the environment first), so any Settings() built in a
+    test sees no key and falls back to UnconfiguredLLM. Live tests opt in explicitly."""
+    if request.node.get_closest_marker("live") is None:
+        monkeypatch.setenv("GEMINI_API_KEY", "")
+        monkeypatch.setenv("GOOGLE_API_KEY", "")
+
+
 @pytest.fixture(scope="session")
 def database_url() -> str:
     try:
