@@ -64,6 +64,16 @@ class TaskSubmitted(BaseModel):
     status: TaskStatus
 
 
+class TaskCancelledOut(BaseModel):
+    """`POST /tasks/{id}/cancel`, as the assignment specifies it."""
+
+    task_id: str
+    status: TaskStatus
+    completed_steps: list[str]
+    """Steps of the newest plan that had completed when the cancel was answered; their
+    results are kept. A step still running then may finish afterwards, and be recorded."""
+
+
 class ProgressOut(BaseModel):
     total_steps: int
     completed_steps: int
@@ -130,9 +140,13 @@ class TaskStatusOut(BaseModel):
     usage: UsageOut
     search: SearchUsageOut
     """Over every research step and attempt of the task."""
+    execution_trace: list["TraceEntryOut"]
+    """The assignment's field: the same timeline `GET /tasks/{id}/trace` returns."""
 
     @classmethod
-    def from_snapshot(cls, snapshot: TaskSnapshot) -> "TaskStatusOut":
+    def from_snapshot(
+        cls, snapshot: TaskSnapshot, execution_trace: list["TraceEntryOut"]
+    ) -> "TaskStatusOut":
         task, progress = snapshot.task, snapshot.progress
         return cls(
             task_id=task.id,
@@ -154,6 +168,7 @@ class TaskStatusOut(BaseModel):
             ),
             usage=UsageOut.of(snapshot.usage),
             search=SearchUsageOut.of(snapshot.usage.search),
+            execution_trace=execution_trace,
         )
 
 
@@ -263,6 +278,14 @@ class SynthesisUsageOut(BaseModel):
     tokens: TokensOut
 
 
+class ResultBodyOut(BaseModel):
+    """`result` as the assignment's Final Result Format nests it."""
+
+    content: str
+    format: str
+    word_count: int
+
+
 class TaskResultOut(BaseModel):
     """The final answer, with where each part came from and how far to trust it."""
 
@@ -286,9 +309,24 @@ class TaskResultOut(BaseModel):
     synthesized_from: list[str]
     synthesis: SynthesisUsageOut
     created_at: datetime
+    format: str
+    """The task's `output_format` the answer was written in."""
+    word_count: int
+    """Whitespace-separated words in `content`, markup included."""
+    result: ResultBodyOut
+    """The assignment's Final Result Format: `content`, `format` and `word_count` again."""
+    execution_trace: list["TraceEntryOut"]
+    """The same timeline `GET /tasks/{id}/trace` returns."""
+    total_tokens: int
+    """Every stage of the task: planning, every step attempt and synthesis."""
+    total_time_ms: int | None
+    """From the task's creation to its completion, from the trace events."""
 
     @classmethod
-    def from_row(cls, task_id: str, row: TaskResult) -> "TaskResultOut":
+    def from_row(
+        cls, task_id: str, row: TaskResult, *, output_format: str, trace: "TaskTraceOut"
+    ) -> "TaskResultOut":
+        word_count = len(row.content.split())
         return cls(
             task_id=task_id,
             status=TaskStatus.COMPLETED,
@@ -310,6 +348,12 @@ class TaskResultOut(BaseModel):
                 ),
             ),
             created_at=row.created_at,
+            format=output_format,
+            word_count=word_count,
+            result=ResultBodyOut(content=row.content, format=output_format, word_count=word_count),
+            execution_trace=trace.timeline,
+            total_tokens=trace.usage.total.total,
+            total_time_ms=trace.durations_ms.total,
         )
 
 
@@ -362,6 +406,11 @@ class ActionOut(BaseModel):
 
 class AgentOut(BaseModel):
     name: str
+    capabilities: list[str]
+    """The actions it accepts (the assignment's field); `actions` describes each one."""
+    status: Literal["available"]
+    """Every listed agent is implemented and can be planned. Whether a model is configured
+    to run it is reported by `GET /health/ready`."""
     description: str
     actions: list[ActionOut]
     searches_web: bool
@@ -372,10 +421,18 @@ class AgentOut(BaseModel):
         actions = spec.actions or tuple((a, "") for a in sorted(spec.capabilities))
         return cls(
             name=spec.name,
+            capabilities=sorted(spec.capabilities),
+            status="available",
             description=spec.description,
             actions=[ActionOut(name=a, description=d) for a, d in actions],
             searches_web=spec.searches_web,
         )
+
+
+class AgentsOut(BaseModel):
+    """`GET /agents`, as the assignment specifies it."""
+
+    agents: list[AgentOut]
 
 
 # --- GET /tasks/{id}/trace -----------------------------------------------------------
@@ -534,3 +591,8 @@ def _durations(trace: TaskTrace) -> StageDurationsOut:
         synthesis=stage(TaskStatus.SYNTHESIZING),
         total=total,
     )
+
+
+# The status and result models name the trace models defined below them.
+TaskStatusOut.model_rebuild()
+TaskResultOut.model_rebuild()

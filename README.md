@@ -40,12 +40,12 @@ POST /tasks ─► planning ─► planned ─► executing ─► synthesizing 
 | Endpoint | What it returns |
 |---|---|
 | `POST /tasks` | `201` with `task_id`; planning, execution and synthesis follow in the background |
-| `GET /tasks/{id}` | status, `failure_stage`, `error`, `progress`, `usage` (tokens by stage) and `search` (grounded calls, queries) |
+| `GET /tasks/{id}` | status, `failure_stage`, `error`, `progress`, `usage` (tokens by stage), `search` (grounded calls, queries) and `execution_trace` (the same timeline as `/trace`) |
 | `GET /tasks/{id}/steps` | every step of the newest plan: state, attempts, full output or error, tokens, `search`, timings; research outputs also carry `grounding` |
 | `GET /tasks/{id}/trace` | the timeline (status changes, step starts and ends, result stored), stage durations, usage, `search` |
-| `GET /tasks/{id}/result` | the final answer with sources, findings, conflicts, limitations; `409` while there is none |
-| `POST /tasks/{id}/cancel` | stops an unfinished task; `409` if it already finished |
-| `GET /agents` | every agent, what each action does, and whether it searches the web |
+| `GET /tasks/{id}/result` | the final answer with sources, findings, conflicts, limitations; also `result` (`content`, `format`, `word_count`), `execution_trace`, `total_tokens` and `total_time_ms`; `409` while there is none |
+| `POST /tasks/{id}/cancel` | stops an unfinished task and lists its `completed_steps`; `409` if it already finished |
+| `GET /agents` | `{"agents": [...]}`: each agent's `name`, `capabilities`, `status` (`available`), what each action does, and whether it searches the web |
 | `GET /metrics` | tasks and steps by status, tokens by stage, `search` totals, background jobs, provider, uptime |
 | `GET /health` | liveness: the process is up |
 | `GET /health/ready` | readiness: the database answers and a provider is configured (`503` otherwise) |
@@ -88,7 +88,8 @@ Track it:
 curl localhost:8000/tasks/task_952e7faa8f2d42168baf28e712bc95b9
 # {"task_id": "...", "status": "executing", "goal": "...", "constraints": {...}, "error": null,
 #  "progress": {"total_steps": 3, "completed_steps": 0, "failed_steps": 0,
-#               "current_step": "step_1", "running_steps": ["step_1", "step_2"]}, ...}
+#               "current_step": "step_1", "running_steps": ["step_1", "step_2"]},
+#  "execution_trace": [{"source": "task", "event": "pending", ...}, ...], ...}
 ```
 
 See every step: its state, attempts, full output or error, tokens and timings, in plan order
@@ -115,7 +116,7 @@ Cancel it (`200`; `409` if it already finished; steps that completed keep their 
 
 ```bash
 curl -X POST localhost:8000/tasks/task_952e7faa8f2d42168baf28e712bc95b9/cancel
-# {"task_id": "...", "status": "cancelled"}
+# {"task_id": "...", "status": "cancelled", "completed_steps": ["step_1"]}
 ```
 
 | Status | Meaning |
@@ -146,7 +147,10 @@ curl localhost:8000/tasks/task_952e7faa8f2d42168baf28e712bc95b9/result
 #    {"claim": "a day with JavaScript", "step_ids": ["step_2"]}]}],
 #  "limitations": ["1 of 2 key finding(s) rest on a single step and are not corroborated."],
 #  "partial": false, "synthesized_from": ["step_1", "step_2", "step_3"],
-#  "synthesis": {"attempts": 1, "tokens": {"input": 900, "output": 300, "total": 1200}}, ...}
+#  "synthesis": {"attempts": 1, "tokens": {"input": 900, "output": 300, "total": 1200}},
+#  "format": "markdown", "word_count": 12,
+#  "result": {"content": "...", "format": "markdown", "word_count": 12},
+#  "execution_trace": [...], "total_tokens": 3560, "total_time_ms": 15420, ...}
 
 # 409 when there is no result, e.g. synthesis failed after the steps ran:
 # {"task_id": "...", "status": "failed", "failure_stage": "synthesis",

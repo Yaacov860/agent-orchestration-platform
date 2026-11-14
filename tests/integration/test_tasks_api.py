@@ -645,7 +645,8 @@ async def test_a_pending_task_can_be_cancelled_and_is_then_never_planned(
     await runner.run_all()  # the queued planning job finds the task no longer pending
 
     assert response.status_code == 200
-    assert response.json() == {"task_id": task_id, "status": "cancelled"}
+    # Nothing ran, so nothing completed.
+    assert response.json() == {"task_id": task_id, "status": "cancelled", "completed_steps": []}
     assert llm.calls == []
     assert (await client.get(f"/tasks/{task_id}")).json()["status"] == "cancelled"
 

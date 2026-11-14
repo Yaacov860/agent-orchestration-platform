@@ -263,7 +263,7 @@ async def test_the_tokens_of_a_failed_planning_are_kept(
 
 
 async def test_agents_lists_every_agent_its_actions_and_who_searches(client: AsyncClient) -> None:
-    agents = (await client.get("/agents")).json()
+    agents = (await client.get("/agents")).json()["agents"]
 
     assert [a["name"] for a in agents] == ["analysis", "code", "research", "writing"]
     by_name = {a["name"]: a for a in agents}

@@ -115,7 +115,7 @@ async def main() -> int:
             return 2
         ready = await client.get("/health/ready")
         print(f"ready: {ready.status_code} {json.dumps(ready.json()['checks'])}")
-        agents = (await client.get("/agents")).json()
+        agents = (await client.get("/agents")).json()["agents"]
         print(f"agents: {[a['name'] for a in agents]}")
         if args.parallel:
             runs = list(
