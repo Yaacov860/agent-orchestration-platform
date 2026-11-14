@@ -9,6 +9,19 @@ services:
       # From your shell or a local .env (never committed). Empty: the API runs, tasks fail clearly.
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.8-flash}
+      GEMINI_FALLBACK_MODELS: ${GEMINI_FALLBACK_MODELS-gemini-3.6-flash,gemini-3.5-flash-lite}
+      GEMINI_TIMEOUT_SECONDS: ${GEMINI_TIMEOUT_SECONDS:-60}
+      # Off unless you turn it on: grounding needs Google Search quota on the key.
+      GEMINI_SEARCH_GROUNDING: ${GEMINI_SEARCH_GROUNDING:-false}
+      # Limits (the app's defaults; README). Out-of-range values stop the app at startup.
+      MAX_CONCURRENT_PLANS: ${MAX_CONCURRENT_PLANS:-4}
+      MAX_CONCURRENT_STEPS: ${MAX_CONCURRENT_STEPS:-4}
+      STEP_TIMEOUT_SECONDS: ${STEP_TIMEOUT_SECONDS:-180}
+      STEP_MAX_ATTEMPTS: ${STEP_MAX_ATTEMPTS:-3}
+      STEP_RETRY_BASE_DELAY_SECONDS: ${STEP_RETRY_BASE_DELAY_SECONDS:-1}
+      MAX_CONTEXT_CHARS_PER_INPUT: ${MAX_CONTEXT_CHARS_PER_INPUT:-8000}
+      MAX_CONCURRENT_SYNTHESES: ${MAX_CONCURRENT_SYNTHESES:-4}
+      SYNTHESIS_TIMEOUT_SECONDS: ${SYNTHESIS_TIMEOUT_SECONDS:-120}
     depends_on:
       postgres:
         condition: service_healthy
