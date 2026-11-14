@@ -45,6 +45,10 @@ logger = logging.getLogger(__name__)
 MAX_CONCURRENT_STEPS = 4
 """Agent runs at once in this process, across all tasks: the LLM's rate limit is shared."""
 
+MAX_GROUNDED_CALLS_PER_TASK = 2
+"""Provider calls with web search attached, per task: a hard limit on grounded requests (every
+attempt and model fallback takes a slot), not on Google queries, which the model chooses."""
+
 INTERNAL_ERROR = "internal error during execution"
 INTERRUPTED_ERROR = "interrupted: the server restarted while this task was being executed"
 NO_PLAN_ERROR = "no plan to execute"
@@ -88,6 +92,7 @@ class ExecutionService:
         retry_delays: Sequence[float] = STEP_RETRY_DELAYS,
         step_timeout: float = STEP_TIMEOUT_SECONDS,
         max_context_chars: int = MAX_CONTEXT_CHARS,
+        max_grounded_calls_per_task: int = MAX_GROUNDED_CALLS_PER_TASK,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Clock = utc_now,
         on_executed: Callable[[str], None] = lambda task_id: None,
@@ -105,6 +110,7 @@ class ExecutionService:
             max_context_chars=max_context_chars,
             sleep=sleep,
             clock=clock,
+            max_grounded_calls=max_grounded_calls_per_task,
         )
         self._scheduled: set[str] = set()
         self._cancel_events: dict[str, asyncio.Event] = {}
@@ -304,6 +310,8 @@ class DbStepRecorder:
             "attempts": outcome.attempts,
             "input_tokens": outcome.usage.input_tokens,
             "output_tokens": outcome.usage.output_tokens,
+            "grounded_calls": outcome.search.grounded_calls,
+            "search_queries": outcome.search.queries,
             "execution_time_ms": outcome.execution_time_ms,
             "completed_at": func.now(),
             "output": outcome.output.model_dump(mode="json") if outcome.output else None,

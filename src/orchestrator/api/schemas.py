@@ -17,6 +17,7 @@ from pydantic import (
 from orchestrator.agents.catalog import AgentSpec
 from orchestrator.db.models import ExecutionStep, TaskResult
 from orchestrator.domain.status import FailureStage, StepStatus, TaskStatus
+from orchestrator.llm.grounding import SearchUsage
 from orchestrator.llm.types import TokenUsage
 from orchestrator.services.tasks import TaskResultView, TaskSnapshot, TaskSteps, TaskTrace
 from orchestrator.services.usage import TaskUsage
@@ -100,6 +101,19 @@ class UsageOut(BaseModel):
         )
 
 
+class SearchUsageOut(BaseModel):
+    """Web search spent, which is billed apart from tokens. `grounded_calls` is held to the
+    hard per-task limit (GEMINI_MAX_GROUNDED_CALLS_PER_TASK). `queries` is what the provider
+    reported afterwards; the model chooses how many to run, and a failed call reports none."""
+
+    grounded_calls: int
+    queries: int
+
+    @classmethod
+    def of(cls, usage: SearchUsage) -> "SearchUsageOut":
+        return cls(grounded_calls=usage.grounded_calls, queries=usage.queries)
+
+
 class TaskStatusOut(BaseModel):
     task_id: str
     status: TaskStatus
@@ -114,6 +128,8 @@ class TaskStatusOut(BaseModel):
     updated_at: datetime
     progress: ProgressOut
     usage: UsageOut
+    search: SearchUsageOut
+    """Over every research step and attempt of the task."""
 
     @classmethod
     def from_snapshot(cls, snapshot: TaskSnapshot) -> "TaskStatusOut":
@@ -137,6 +153,7 @@ class TaskStatusOut(BaseModel):
                 running_steps=list(progress.running_steps),
             ),
             usage=UsageOut.of(snapshot.usage),
+            search=SearchUsageOut.of(snapshot.usage.search),
         )
 
 
@@ -145,11 +162,22 @@ class SourceOut(BaseModel):
     url: str
 
 
+class GroundingOut(BaseModel):
+    status: Literal["grounded", "unverified"]
+    """grounded: web search ran and the provider returned the pages used (`sources`).
+    unverified: no search ran, or it returned no pages: the findings are the model's own."""
+    reason: str | None
+    search_queries: list[str]
+    """What the provider reports the search asked Google, for the call behind this output."""
+
+
 class StepOutputOut(BaseModel):
     content: str
     """The agent's full output, as stored (inputs to later steps may have been cut)."""
     sources: list[SourceOut]
     confidence: float | None
+    grounding: GroundingOut | None = Field(default=None, exclude_if=lambda value: value is None)
+    """Research steps only: whether the findings rest on web search, and if not, why."""
 
 
 class StepErrorOut(BaseModel):
@@ -177,6 +205,8 @@ class StepOut(BaseModel):
     error: StepErrorOut | None
     tokens: TokensOut
     """Over every attempt."""
+    search: SearchUsageOut
+    """Over every attempt (zero for every agent but research)."""
     execution_time_ms: int | None
     """Time spent in the agent over every attempt, without waits for a slot or a retry."""
     started_at: datetime | None
@@ -199,6 +229,7 @@ class StepOut(BaseModel):
                 output=row.output_tokens,
                 total=row.input_tokens + row.output_tokens,
             ),
+            search=SearchUsageOut(grounded_calls=row.grounded_calls, queries=row.search_queries),
             execution_time_ms=row.execution_time_ms,
             started_at=row.started_at,
             completed_at=row.completed_at,
@@ -363,6 +394,8 @@ class TraceEntryOut(BaseModel):
     error: str | None = None
     failure_stage: FailureStage | None = None
     tokens: TokenCountOut | None = None
+    search: SearchUsageOut | None = None
+    """Step ends only: web search spent over the step's attempts."""
     duration_ms: int | None = None
 
 
@@ -388,6 +421,7 @@ class TaskTraceOut(BaseModel):
     status: TaskStatus
     durations_ms: StageDurationsOut
     usage: UsageOut
+    search: SearchUsageOut
     timeline: list[TraceEntryOut]
     """In time order: every status change, every step start and end, the stored result."""
     not_run: list[NotRunStepOut]
@@ -444,6 +478,9 @@ class TaskTraceOut(BaseModel):
                             output=step.output_tokens,
                             total=step.input_tokens + step.output_tokens,
                         ),
+                        search=SearchUsageOut(
+                            grounded_calls=step.grounded_calls, queries=step.search_queries
+                        ),
                         duration_ms=step.execution_time_ms,
                         step_id=step.step_id,
                         agent=step.agent,
@@ -470,6 +507,7 @@ class TaskTraceOut(BaseModel):
             status=trace.task.status,
             durations_ms=_durations(trace),
             usage=UsageOut.of(trace.usage),
+            search=SearchUsageOut.of(trace.usage.search),
             timeline=timeline,
             not_run=not_run,
         )

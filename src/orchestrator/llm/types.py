@@ -8,6 +8,8 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from orchestrator.llm.grounding import GroundingReport, StepGrounding
+
 
 class Source(BaseModel):
     """A citation the provider returned alongside the text (e.g. a search-grounding result)."""
@@ -36,7 +38,7 @@ class TokenUsage(BaseModel):
 
 
 class LLMRequest(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     system_prompt: str
     user_prompt: str
@@ -44,6 +46,9 @@ class LLMRequest(BaseModel):
     max_output_tokens: int = Field(default=2048, gt=0)
     use_search: bool = False
     """Ask the provider to ground the answer in live web search and return the sources it used."""
+    grounding: StepGrounding | None = Field(default=None, exclude=True, repr=False)
+    """The step's share of its task's grounded-call budget (grounding.py). Set by the agent
+    run, never by the agent: every provider call that would attach search reserves from it."""
 
 
 class LLMResponse(BaseModel):
@@ -53,3 +58,6 @@ class LLMResponse(BaseModel):
     usage: TokenUsage
     model: str
     sources: tuple[Source, ...] = ()
+    grounding: GroundingReport | None = None
+    """For a request with `use_search`: whether search was attached, why not, and the queries
+    the provider reports. None from a provider that does not report it."""

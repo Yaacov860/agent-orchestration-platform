@@ -389,6 +389,70 @@ status, tokens by stage, running background jobs and the provider, all from the 
 they cover every instance. It is a JSON snapshot, not Prometheus: no new dependency, and
 there is no metrics stack to scrape it yet.
 
+## 0.8 Bounded Google Search grounding
+
+**Off unless configured.** `GEMINI_SEARCH_GROUNDING` defaults to `false` in `Settings`,
+in `docker compose` and in `GeminiLLM` itself. Grounding needs Google Search quota on the key
+(a free-tier key has none). On Gemini 3 it is billed per search query the model decides to
+run, apart from tokens. A deployment turns it on explicitly.
+
+**Only the research action can search.** `ResearchAgent` asks for search on `research`
+steps, never on `summarize`. The other agents never ask. The executor hands every agent run
+its step's share of the task's budget, and `MeteredLLM` attaches it to search requests only.
+An agent cannot use search without the budget seeing it. Tests check that writing,
+analysis, code and summarize steps leave the budget untouched.
+
+**What the Gemini API allows us to limit.** The installed SDK (google-genai 3.3.0) and the
+API documentation were checked before choosing. `GoogleSearch` takes only `search_types`,
+`blocking_confidence`, `exclude_domains` and `time_range_filter`. Nothing caps the number of
+queries. `maximum_remote_calls` applies to client-side function calling, not to the
+server-side search tool. The model decides whether to search and runs "one or multiple"
+queries. A prompt that asks for "a few focused queries" therefore guides the model but limits
+nothing, and is not presented as a limit.
+
+**So the hard limit is on grounded requests, not queries.** `GEMINI_MAX_GROUNDED_CALLS_PER_TASK`
+(default 2, range 0–50) is a per-task budget, shared by all its research steps
+(`llm/grounding.py`).
+- A slot is reserved immediately before every Gemini request that would attach search: a
+  first attempt, an executor retry, and each model fallback inside `GeminiLLM`.
+- A request that then fails keeps its slot spent, because it may still have searched and
+  been billed.
+- The check and the increment run without an `await` between them, so parallel steps on the
+  one event loop cannot both take the last slot. A test runs ten concurrent reservations
+  against three slots.
+- When no slot is left, the request is sent without the search tool. Research continues
+  instead of failing.
+
+**Queries are counted, after the fact.** Gemini reports the queries a grounded request ran
+in `grounding_metadata.web_search_queries`. They are recorded:
+- per step, over all attempts, in `execution_steps.grounded_calls` and `search_queries`
+  (migration 0005);
+- per task, in `search` on `GET /tasks/{id}` and on the trace;
+- for the whole process, in `/metrics`.
+
+This is reporting, not control. A request that failed or timed out reports nothing, so the
+count can be lower than what was billed. There is deliberately no query budget: one could
+only stop *further* requests once the count was reached, so it would overshoot by up to the
+queries of the last request, and it would undercount failed ones. The request cap is the
+limit that holds.
+
+**Verified versus unverified is set by code.** Each research output carries
+`grounding: {status, reason, search_queries}`, derived from what the provider reported, not
+from the model's text.
+- `grounded`: search was attached and pages came back. Those pages are the step's
+  `sources`.
+- `unverified`, with a reason: grounding disabled, the budget used up, search attached but
+  no pages returned, or a provider that did not report.
+- When it is certain that no search ran, the text itself starts with `Unverified: <reason>.`.
+  This replaces any such line the model wrote, because the model was never told why it had no
+  search.
+- Synthesis turns every unverified step into a `limitations` entry. Sources stay
+  provider-only (0.4), so an unverified step contributes no citation.
+
+**Light by construction.** One model call per research step, no internal repair loop, about
+300 words. The planner, not research, decides how many research steps a task has, and the
+budget caps how many of them may search.
+
 ## 1. Task Decomposition Strategy
 
 **The model proposes, the code decides.** The planner asks the LLM for a JSON plan; nothing it

@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 
 import httpx
+import pytest
 from factories import plan_json, plan_step, synthesis_json
 from fakes import ManualRunner, caller_of
 from google.genai import errors, types
@@ -40,11 +41,12 @@ ANSWERS = {
 def answer(text: str, *, search: bool) -> types.GenerateContentResponse:
     grounding = (
         types.GroundingMetadata(
+            web_search_queries=["python for beginners"],
             grounding_chunks=[
                 types.GroundingChunk(
                     web=types.GroundingChunkWeb(uri="https://docs.python.org", title="Python docs")
                 )
-            ]
+            ],
         )
         if search
         else None
@@ -85,8 +87,16 @@ class GeminiNetwork:
         return answer(ANSWERS[caller], search=config.tools is not None)
 
 
-async def run(database_url: str, network: GeminiNetwork, **settings: object) -> dict[str, Any]:
-    llm = GeminiLLM(api_key="AIza-test-only", model="gemini-test", models=network)
+async def run(
+    database_url: str, network: GeminiNetwork, *, search_grounding: bool = True, **settings: object
+) -> dict[str, Any]:
+    # Grounding is off by default; these tests drive the grounded path on purpose.
+    llm = GeminiLLM(
+        api_key="AIza-test-only",
+        model="gemini-test",
+        models=network,
+        search_grounding=search_grounding,
+    )
     runner = ManualRunner()
     app = create_app(Settings(database_url=database_url, **settings), llm=llm, runner=runner)  # type: ignore[arg-type]
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -124,6 +134,15 @@ async def test_the_planner_all_four_agents_and_synthesis_run_on_the_same_gemini_
         {"title": "Python docs", "url": "https://docs.python.org", "step_ids": ["step_1"]}
     ]
     assert out["result"]["synthesis"]["tokens"] == {"input": 50, "output": 20, "total": 70}
+    # The grounded call's queries, as Gemini reported them, counted for the step and the task.
+    research = next(s for s in out["steps"] if s["agent"] == "research")
+    assert research["output"]["grounding"] == {
+        "status": "grounded",
+        "reason": None,
+        "search_queries": ["python for beginners"],
+    }
+    assert research["search"] == {"grounded_calls": 1, "queries": 1}
+    assert out["status"]["search"] == {"grounded_calls": 1, "queries": 1}
 
 
 async def test_transient_gemini_errors_are_retried_at_every_stage(
@@ -202,3 +221,35 @@ async def test_a_step_whose_gemini_call_keeps_timing_out_fails_and_the_rest_comp
     assert code["error"]["message"] == "Gemini did not answer within 60s (GEMINI_TIMEOUT_SECONDS)"
     assert code["error"]["retryable"] is True
     assert out["result"]["partial"] is True  # synthesis went ahead without the code step
+
+
+@pytest.mark.parametrize(
+    ("search_grounding", "budget", "reason"),
+    [
+        (False, 2, "Google Search grounding is disabled (GEMINI_SEARCH_GROUNDING=false)"),
+        (True, 0, "the task's grounded-call budget is used up (0 of 0 calls"),
+    ],
+)
+async def test_without_grounding_research_runs_unsearched_and_the_result_says_so(
+    database_url: str, engine: AsyncEngine, search_grounding: bool, budget: int, reason: str
+) -> None:
+    network = GeminiNetwork()
+
+    out = await run(
+        database_url,
+        network,
+        search_grounding=search_grounding,
+        gemini_max_grounded_calls_per_task=budget,
+    )
+
+    assert out["status"]["status"] == "completed"
+    assert all(config.tools is None for _, config in network.calls)  # no call searched
+    research = next(s for s in out["steps"] if s["agent"] == "research")
+    assert research["output"]["grounding"]["status"] == "unverified"
+    assert research["output"]["grounding"]["reason"].startswith(reason)
+    assert research["output"]["content"].startswith("Unverified: ")
+    assert research["output"]["sources"] == []
+    assert out["status"]["search"] == {"grounded_calls": 0, "queries": 0}
+    assert any(
+        "step_1 (research: research) is unverified" in n for n in out["result"]["limitations"]
+    )

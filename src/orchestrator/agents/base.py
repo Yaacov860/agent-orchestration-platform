@@ -6,7 +6,14 @@ from collections.abc import Mapping
 from typing import ClassVar, Literal
 
 from orchestrator.agents.types import AgentOutput, AgentResult, AgentTask, ErrorInfo
-from orchestrator.llm import LLMClient, LLMError, LLMRequest, LLMResponse, TokenUsage
+from orchestrator.llm import (
+    LLMClient,
+    LLMError,
+    LLMRequest,
+    LLMResponse,
+    StepGrounding,
+    TokenUsage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +28,18 @@ class MeteredLLM:
     A fresh one is created per run because a single agent instance serves many steps
     concurrently; a token counter stored on the agent itself would mix their numbers.
     It satisfies the LLMClient protocol, so `execute` cannot tell it from the real client.
+    It also attaches the step's grounding budget to every search request, so an agent never
+    handles the budget itself and cannot forget it.
     """
 
-    def __init__(self, llm: LLMClient) -> None:
+    def __init__(self, llm: LLMClient, grounding: StepGrounding | None = None) -> None:
         self._llm = llm
+        self._grounding = grounding
         self.usage = TokenUsage()
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
+        if request.use_search and request.grounding is None and self._grounding is not None:
+            request = request.model_copy(update={"grounding": self._grounding})
         response = await self._llm.generate(request)
         self.usage = self.usage + response.usage
         return response
@@ -63,9 +75,11 @@ class BaseAgent(ABC):
     def __init__(self, llm: LLMClient) -> None:
         self._llm = llm
 
-    async def run(self, task: AgentTask) -> AgentResult:
+    async def run(self, task: AgentTask, *, grounding: StepGrounding | None = None) -> AgentResult:
+        """`grounding`: this step's share of its task's grounded-call budget (the executor's).
+        Without it, search requests are not budgeted."""
         started = time.perf_counter()
-        meter = MeteredLLM(self._llm)
+        meter = MeteredLLM(self._llm, grounding)
         error: ErrorInfo
         try:
             if task.action not in self.capabilities:

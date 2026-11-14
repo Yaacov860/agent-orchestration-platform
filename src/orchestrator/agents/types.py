@@ -33,12 +33,30 @@ class AgentTask(BaseModel):
     """Outputs of the steps this one depends on. Filled by the executor."""
 
 
+class Grounding(BaseModel):
+    """Whether a research answer rests on web search, and if not, why. Set by code from what
+    the provider reported, never by the model."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: Literal["grounded", "unverified"]
+    """grounded: search was attached and the provider returned the pages it used.
+    unverified: no search ran, or it returned no pages: the answer is the model's own."""
+    reason: str | None = None
+    """Why the answer is unverified (search disabled, budget used up, no pages returned)."""
+    search_queries: tuple[str, ...] = ()
+    """The queries the provider reports for the call that produced this answer."""
+
+
 class AgentOutput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     content: str
     sources: tuple[Source, ...] = ()
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    grounding: Grounding | None = Field(default=None, exclude_if=lambda value: value is None)
+    """Research only (the one action that may search). Left out of the stored output of
+    every other step, so their shape is unchanged."""
 
 
 class ErrorInfo(BaseModel):

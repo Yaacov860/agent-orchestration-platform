@@ -7,7 +7,7 @@ from orchestrator.execution.executor import (
     STEP_RETRY_DELAYS,
     STEP_TIMEOUT_SECONDS,
 )
-from orchestrator.services.execution import MAX_CONCURRENT_STEPS
+from orchestrator.services.execution import MAX_CONCURRENT_STEPS, MAX_GROUNDED_CALLS_PER_TASK
 from orchestrator.services.planning import MAX_CONCURRENT_PLANS
 
 
@@ -32,6 +32,13 @@ def test_settings_defaults_match_the_services_own_defaults() -> None:
     assert default.step_timeout_seconds == STEP_TIMEOUT_SECONDS
     assert default.step_retry_delays == STEP_RETRY_DELAYS
     assert default.max_context_chars_per_input == MAX_CONTEXT_CHARS
+    assert default.gemini_max_grounded_calls_per_task == MAX_GROUNDED_CALLS_PER_TASK
+
+
+def test_search_grounding_is_off_unless_turned_on() -> None:
+    # Billed per Google query and needs quota: never on by accident.
+    assert defaults().gemini_search_grounding is False
+    assert defaults().gemini_max_grounded_calls_per_task == 2
 
 
 @pytest.mark.parametrize(
@@ -55,6 +62,8 @@ def test_retry_delays_follow_from_attempts_and_base(
         ("step_max_attempts", 0),
         ("step_retry_base_delay_seconds", -1),
         ("max_context_chars_per_input", 10),
+        ("gemini_max_grounded_calls_per_task", -1),
+        ("gemini_max_grounded_calls_per_task", 51),
     ],
 )
 def test_an_out_of_range_limit_is_refused_naming_the_field(field: str, value: object) -> None:

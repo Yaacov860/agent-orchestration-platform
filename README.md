@@ -40,13 +40,13 @@ POST /tasks ─► planning ─► planned ─► executing ─► synthesizing 
 | Endpoint | What it returns |
 |---|---|
 | `POST /tasks` | `201` with `task_id`; planning, execution and synthesis follow in the background |
-| `GET /tasks/{id}` | status, `failure_stage`, `error`, `progress`, and `usage` (tokens by stage) |
-| `GET /tasks/{id}/steps` | every step of the newest plan: state, attempts, full output or error, tokens, timings |
-| `GET /tasks/{id}/trace` | the timeline (status changes, step starts and ends, result stored), stage durations, usage |
+| `GET /tasks/{id}` | status, `failure_stage`, `error`, `progress`, `usage` (tokens by stage) and `search` (grounded calls, queries) |
+| `GET /tasks/{id}/steps` | every step of the newest plan: state, attempts, full output or error, tokens, `search`, timings; research outputs also carry `grounding` |
+| `GET /tasks/{id}/trace` | the timeline (status changes, step starts and ends, result stored), stage durations, usage, `search` |
 | `GET /tasks/{id}/result` | the final answer with sources, findings, conflicts, limitations; `409` while there is none |
 | `POST /tasks/{id}/cancel` | stops an unfinished task; `409` if it already finished |
 | `GET /agents` | every agent, what each action does, and whether it searches the web |
-| `GET /metrics` | tasks and steps by status, tokens by stage, background jobs, provider, uptime |
+| `GET /metrics` | tasks and steps by status, tokens by stage, `search` totals, background jobs, provider, uptime |
 | `GET /health` | liveness: the process is up |
 | `GET /health/ready` | readiness: the database answers and a provider is configured (`503` otherwise) |
 
@@ -56,7 +56,7 @@ OpenAPI: `/docs` and `/openapi.json`.
 
 | Agent | Actions | Works from | Sources |
 |---|---|---|---|
-| `research` | `research` (web search), `summarize` | the web; earlier steps | yes: the pages its search used |
+| `research` | `research` (web search, when grounding is on), `summarize` | the web; earlier steps | yes: the pages its search used |
 | `writing` | `write`, `rewrite`, `draft_email` | earlier steps (facts), constraints (tone, length) | none |
 | `analysis` | `analyze`, `compare`, `evaluate` | earlier steps or data in the task; invents none | none |
 | `code` | `write_code`, `explain_code`, `review_code`, `fix_bug` | the step and earlier steps; text only, runs nothing | none |
@@ -196,7 +196,7 @@ past the deadline is not started, and steps that never ran are `skipped` with
 
 An out-of-range value (`MAX_CONCURRENT_STEPS=0`, say) stops the app at startup, naming the field.
 `docker compose` forwards every setting in this table and in the Gemini table below from your
-shell or `.env`, with the same defaults (one exception: `GEMINI_SEARCH_GROUNDING`, below).
+shell or `.env`, with the same defaults.
 
 **After a restart**, a task left `planning` or `executing` becomes `failed`
 (`interrupted: the server restarted ...`; completed steps keep their results), a task still
@@ -220,7 +220,8 @@ docker compose up --build          # compose forwards the key and the settings b
 | `GEMINI_MODEL` | `gemini-3.8-flash` | any Gemini text model your key can use |
 | `GEMINI_TIMEOUT_SECONDS` | 60 | one HTTP call to Gemini |
 | `GEMINI_FALLBACK_MODELS` | `gemini-3.6-flash,gemini-3.5-flash-lite` | tried in order for a call when the model before them is overloaded (503/504) or out of quota (429) |
-| `GEMINI_SEARCH_GROUNDING` | `true`; **`false` under `docker compose`** | Google Search grounding for research steps (no other agent searches). It needs Google Search quota on the key, so Compose leaves it off unless you set `GEMINI_SEARCH_GROUNDING=true`. Off: research runs without search, says so, and reports no sources |
+| `GEMINI_SEARCH_GROUNDING` | `false` | Google Search grounding for `research` steps (no other agent, and not `summarize`, ever searches). Off by default: it needs Google Search quota on the key and is billed per search query. Off: research runs without search, is labelled unverified, and reports no sources |
+| `GEMINI_MAX_GROUNDED_CALLS_PER_TASK` | 2 | a **hard** limit on Gemini requests sent with search attached, per task: every research attempt, retry and model fallback takes one (0: none). It does **not** limit Google queries: see below |
 
 Without a key the app still starts: each task fails at planning with
 `no LLM provider is configured: LLM_PROVIDER=gemini but GEMINI_API_KEY is not set ...`. An
@@ -235,6 +236,34 @@ day, Google Search grounding may have no quota at all, and popular models are of
 overloaded. What worked end to end on 2026-11-14 was `GEMINI_SEARCH_GROUNDING=false` with the
 default fallbacks, and tasks submitted one at a time. Without grounding, results have no
 sources and low confidence, and say so in their limitations.
+
+**Bounded grounding: what is limited, and what is only counted.**
+
+- **Limited, hard: grounded requests.** Each task gets `GEMINI_MAX_GROUNDED_CALLS_PER_TASK`
+  slots, shared by all its research steps, parallel ones included. Before every Gemini
+  request that would attach Google Search, a slot is reserved. That covers a step's first
+  attempt, each retry and each model fallback. A request that then fails still used its
+  slot, because it may have searched and been billed. When no slot is left, the step still
+  runs, without search.
+- **Not limited: Google queries.** The model decides how many queries one grounded request
+  runs, and the Gemini API has no parameter that caps them. The research prompt asks for "a
+  few focused queries" on one step, but that is an instruction, not a limit. Queries are
+  counted afterwards from Gemini's `web_search_queries`, per step and per task. A request
+  that failed or timed out reports none, so the count can be lower than what was billed.
+  Gemini 3 bills grounding per query: one task can cost more queries than its grounded
+  requests.
+- **Verified or not, per research step.** Each research output has
+  `grounding: {status, reason, search_queries}`:
+  - `grounded`: search ran and Gemini returned the pages used, which are its `sources`.
+  - `unverified`, with a reason: grounding off, the budget used up, or search ran but
+    returned no pages.
+
+  When no search ran at all, the step's text also starts with `Unverified: <reason>.`.
+  Synthesis adds every unverified step to the result's `limitations`. Only grounded pages
+  ever become `sources`.
+
+Per step, `search` is `{grounded_calls, queries}` over every attempt. The task, the trace
+and `/metrics` add these up. Search is counted apart from `usage`, which stays tokens only.
 
 | Field | Rules |
 |---|---|

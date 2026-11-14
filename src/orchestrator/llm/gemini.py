@@ -4,7 +4,8 @@
                     system_instruction          (one HTTP call: SDK retries off,
                     temperature                  timeout per call)
                     max_output_tokens
-                    tools: google_search  (only when use_search)
+                    tools: google_search  (only when use_search, grounding is on and the
+                                           task's grounded-call budget has a slot left)
 
 Like every provider, it raises only LLMTransientError / LLMPermanentError (errors.py), so the
 callers' retry policies (planning, execution, synthesis) never see an SDK type. The SDK's own
@@ -26,7 +27,10 @@ from google.genai import Client, errors, types
 from pydantic import ValidationError
 
 from orchestrator.llm.errors import LLMPermanentError, LLMTransientError
+from orchestrator.llm.grounding import GroundingReport, may_ground
 from orchestrator.llm.types import LLMRequest, LLMResponse, Source, TokenUsage
+
+GROUNDING_DISABLED = "Google Search grounding is disabled (GEMINI_SEARCH_GROUNDING=false)"
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +87,7 @@ class GeminiLLM:
         model: str = DEFAULT_MODEL,
         timeout_seconds: float = 60.0,
         fallback_models: Sequence[str] = (),
-        search_grounding: bool = True,
+        search_grounding: bool = False,
         models: GenerateContent | None = None,
     ) -> None:
         if not api_key.strip():
@@ -92,8 +96,10 @@ class GeminiLLM:
         self.fallback_models = tuple(m for m in dict.fromkeys(fallback_models) if m != model)
         """Tried in order, for one call, when the model before them is overloaded (503/504)."""
         self.search_grounding = search_grounding
-        """False for accounts without Google Search grounding quota: research then runs
-        without search and reports no sources (and so low confidence), instead of failing."""
+        """Off unless turned on (GEMINI_SEARCH_GROUNDING): grounding is billed per search
+        query and needs Google Search quota. Off, research runs without search, is labelled
+        unverified and reports no sources. On, each grounded call also needs a slot in the
+        task's budget (grounding.py)."""
         self._timeout_seconds = timeout_seconds
         self._secret = api_key
         if models is None:
@@ -117,17 +123,21 @@ class GeminiLLM:
         return f"GeminiLLM(model={self.model!r}, timeout_seconds={self._timeout_seconds})"
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
-        search = request.use_search and self.search_grounding
-        config = types.GenerateContentConfig(
-            system_instruction=request.system_prompt,
-            temperature=request.temperature,
-            max_output_tokens=request.max_output_tokens,
-            tools=[types.Tool(google_search=types.GoogleSearch())] if search else None,
-        )
         chain = (self.model, *self.fallback_models)
         for index, model in enumerate(chain):
+            # Decided per HTTP call: a fallback is another grounded request, so it reserves
+            # its own slot from the task's budget (grounding.py), or goes without search.
+            report = may_ground(
+                request, enabled=self.search_grounding, disabled_reason=GROUNDING_DISABLED
+            )
+            config = types.GenerateContentConfig(
+                system_instruction=request.system_prompt,
+                temperature=request.temperature,
+                max_output_tokens=request.max_output_tokens,
+                tools=[types.Tool(google_search=types.GoogleSearch())] if report.used else None,
+            )
             try:
-                return await self._generate_once(model, request, config)
+                response = await self._generate_once(model, request, config)
             except _Overloaded as overloaded:
                 if index == len(chain) - 1:
                     raise overloaded.error from None
@@ -137,6 +147,8 @@ class GeminiLLM:
                     overloaded.code,
                     chain[index + 1],
                 )
+                continue
+            return _with_grounding(response, request, report)
         raise AssertionError("unreachable: the last model either answers or raises")
 
     async def _generate_once(
@@ -189,11 +201,14 @@ class GeminiLLM:
         if reason == types.FinishReason.MAX_TOKENS:
             logger.warning("Gemini answer cut at max_output_tokens (%d characters)", len(text))
 
+        queries = _queries(candidate.grounding_metadata)
         return LLMResponse(
             text=text,
             usage=_usage(response.usage_metadata),
             model=response.model_version or model,
             sources=_sources(candidate.grounding_metadata),
+            # Provisional: generate() sets whether search was attached, and why not.
+            grounding=GroundingReport(used=True, queries=queries) if queries else None,
         )
 
     def _api_error(
@@ -263,6 +278,28 @@ def _sources(metadata: types.GroundingMetadata | None) -> tuple[Source, ...]:
         if web is not None and web.uri:
             sources.append(Source(title=web.title or web.domain or web.uri, url=web.uri))
     return tuple(sources)
+
+
+def _queries(metadata: types.GroundingMetadata | None) -> tuple[str, ...]:
+    """The Google Search queries the model ran for this answer, as the provider reports them."""
+    if metadata is None or not metadata.web_search_queries:
+        return ()
+    return tuple(q for q in metadata.web_search_queries if q and q.strip())
+
+
+def _with_grounding(
+    response: LLMResponse, request: LLMRequest, report: GroundingReport
+) -> LLMResponse:
+    """The final grounding report of a call that asked for search (none if it did not), and
+    its queries counted in the step's ledger. Queries are counted after the fact: nothing
+    in the API caps how many one grounded call runs."""
+    if not request.use_search:
+        return response.model_copy(update={"grounding": None})
+    queries = response.grounding.queries if report.used and response.grounding else ()
+    if report.used and request.grounding is not None:
+        request.grounding.record_queries(queries)
+    final = GroundingReport(used=report.used, reason=report.reason, queries=queries)
+    return response.model_copy(update={"grounding": final})
 
 
 def _retry_after(details: Any) -> float | None:

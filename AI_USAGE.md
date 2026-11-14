@@ -16,7 +16,7 @@ stage 3 (planner and its integration), the execution engine and the synthesis en
 | Caller | Calls | Purpose |
 |---|---|---|
 | Planner | 1, plus at most 1 repair | break the goal into a validated step graph |
-| Research agent | 1 per step attempt, up to 3 attempts | do one step (web-grounded for `research`) |
+| Research agent | 1 per step attempt, up to 3 attempts | do one step (`research` is web-grounded only when `GEMINI_SEARCH_GROUNDING` is on, and only within the task's grounded-call budget; otherwise it is labelled unverified) |
 | Writing, analysis, code agents | 1 per step attempt, up to 3 attempts | write, analyze or work with code from earlier steps' outputs; no search |
 | Synthesizer | 1, plus at most 1 repair; up to 2 retries of a transient error | combine the step outputs into the final answer |
 

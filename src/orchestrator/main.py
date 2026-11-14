@@ -59,6 +59,7 @@ def create_app(
         retry_delays=settings.step_retry_delays,
         step_timeout=settings.step_timeout_seconds,
         max_context_chars=settings.max_context_chars_per_input,
+        max_grounded_calls_per_task=settings.gemini_max_grounded_calls_per_task,
         on_executed=synthesis.schedule,
     )
     planning = PlanningService(

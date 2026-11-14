@@ -284,6 +284,8 @@ def _input(task: Task, plan: ExecutionPlan) -> SynthesisInput:
                 sources=output.sources if output else (),
                 confidence=output.confidence if output else None,
                 error=str(error) if error is not None else None,
+                grounding_status=output.grounding.status if output and output.grounding else None,
+                grounding_reason=output.grounding.reason if output and output.grounding else None,
             )
         )
     return SynthesisInput(

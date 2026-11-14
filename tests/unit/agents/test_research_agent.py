@@ -4,7 +4,14 @@ from typing import ClassVar
 import pytest
 
 from orchestrator.agents import AgentOutput, AgentTask, BaseAgent, ContextItem, ResearchAgent
-from orchestrator.llm import LLMClient, LLMPermanentError, LLMRequest, LLMTransientError, Source
+from orchestrator.llm import (
+    LLMClient,
+    LLMPermanentError,
+    LLMRequest,
+    LLMResponse,
+    LLMTransientError,
+    Source,
+)
 from orchestrator.llm.fake import FakeLLM, fake_response
 
 PYTHON_ORG = Source(title="Python", url="https://python.org")
@@ -252,3 +259,106 @@ def test_the_research_prompt_covers_running_without_search() -> None:
     assert "Use web search if it is available to you" in RESEARCH_SYSTEM_PROMPT
     assert "Unverified: no web search was available" in RESEARCH_SYSTEM_PROMPT
     assert "never write tool or function calls as text" in RESEARCH_SYSTEM_PROMPT
+
+
+# --- grounding status (llm/grounding.py) ----------------------------------------------------
+
+
+async def test_a_grounded_answer_is_marked_grounded_with_its_queries() -> None:
+    from orchestrator.llm import GroundingBudget
+
+    step = GroundingBudget(2).for_step("step_1")
+    llm = FakeLLM([fake_response("- Readable", sources=[PYTHON_ORG], search_queries=["py"])])
+
+    result = await ResearchAgent(llm).run(make_task(), grounding=step)
+
+    assert result.output is not None and result.output.grounding is not None
+    assert result.output.grounding.status == "grounded"
+    assert result.output.grounding.search_queries == ("py",)
+    assert result.output.content == "- Readable"  # grounded: the text is left as written
+    assert step.usage.grounded_calls == 1 and step.usage.queries == 1
+
+
+async def test_with_the_budget_used_up_research_still_answers_and_is_labelled_unverified() -> None:
+    from orchestrator.llm import GroundingBudget
+
+    step = GroundingBudget(0).for_step("step_1")
+    llm = FakeLLM([fake_response("- From memory", sources=[PYTHON_ORG])])
+
+    result = await ResearchAgent(llm).run(make_task(), grounding=step)
+
+    assert result.status == "completed"
+    assert result.output is not None and result.output.grounding is not None
+    assert result.output.grounding.status == "unverified"
+    reason = result.output.grounding.reason or ""
+    assert "grounded-call budget is used up" in reason
+    assert result.output.content.startswith(f"Unverified: {reason}.")
+    assert result.output.content.endswith("- From memory")
+    assert result.output.sources == ()  # no search ran, so nothing can be cited
+    assert result.output.confidence == 0.3
+
+
+async def test_the_models_own_unverified_line_is_replaced_not_repeated() -> None:
+    from orchestrator.llm.fake import SEARCH_OFF
+
+    llm = FakeLLM(
+        [fake_response("Unverified: no web search was available\n\n- From memory")],
+        search=False,
+    )
+
+    result = await ResearchAgent(llm).run(make_task())
+
+    assert result.output is not None
+    content = result.output.content
+    assert content.count("Unverified") == 1
+    assert content.startswith(f"Unverified: {SEARCH_OFF}.")
+    assert content.endswith("- From memory")
+
+
+async def test_search_that_returned_no_pages_is_unverified_but_the_text_is_kept() -> None:
+    from orchestrator.agents.research import NO_PAGES
+
+    llm = FakeLLM([fake_response("- Thin evidence")])
+
+    result = await ResearchAgent(llm).run(make_task())
+
+    assert result.output is not None and result.output.grounding is not None
+    assert (result.output.grounding.status, result.output.grounding.reason) == (
+        "unverified",
+        NO_PAGES,
+    )
+    assert result.output.content == "- Thin evidence"  # search did run: not relabelled
+
+
+async def test_a_provider_that_reports_nothing_is_judged_by_its_sources() -> None:
+    from orchestrator.agents.research import NOT_REPORTED
+
+    class Silent:
+        async def generate(self, request: LLMRequest) -> LLMResponse:
+            return fake_response("- x")  # no grounding report at all
+
+    result = await ResearchAgent(Silent()).run(make_task())
+
+    assert result.output is not None and result.output.grounding is not None
+    assert result.output.grounding.reason == NOT_REPORTED
+
+
+async def test_summarize_never_searches_and_carries_no_grounding() -> None:
+    from orchestrator.llm import GroundingBudget
+
+    step = GroundingBudget(1).for_step("step_1")
+    llm = FakeLLM([fake_response("- summary")])
+
+    result = await ResearchAgent(llm).run(make_task("summarize"), grounding=step)
+
+    assert llm.calls[0].use_search is False
+    assert result.output is not None and result.output.grounding is None
+    assert "grounding" not in result.output.model_dump(mode="json")
+    assert step.usage.grounded_calls == 0
+
+
+def test_the_prompt_asks_for_light_focused_search() -> None:
+    from orchestrator.agents.research import RESEARCH_SYSTEM_PROMPT
+
+    assert "quick research on one step, not a survey" in RESEARCH_SYSTEM_PROMPT
+    assert "only the few focused" in RESEARCH_SYSTEM_PROMPT

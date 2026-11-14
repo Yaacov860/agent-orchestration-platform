@@ -37,8 +37,8 @@ async def ready(request: Request) -> JSONResponse:
 
 @router.get("/metrics")
 async def metrics(request: Request) -> dict[str, Any]:
-    """A JSON snapshot: tasks and steps by status, tokens recorded, background jobs, the
-    provider, uptime. Counts come from the database, so they cover every instance."""
+    """A JSON snapshot: tasks and steps by status, tokens and web search recorded, background
+    jobs, the provider, uptime. Counts come from the database, so they cover every instance."""
     sessionmaker: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
     async with sessionmaker() as session:
         tasks = dict(
@@ -51,11 +51,13 @@ async def metrics(request: Request) -> dict[str, Any]:
                 )
             ).all()
         )
-        step_in, step_out = (
+        step_in, step_out, grounded_calls, search_queries = (
             await session.execute(
                 select(
                     func.coalesce(func.sum(ExecutionStep.input_tokens), 0),
                     func.coalesce(func.sum(ExecutionStep.output_tokens), 0),
+                    func.coalesce(func.sum(ExecutionStep.grounded_calls), 0),
+                    func.coalesce(func.sum(ExecutionStep.search_queries), 0),
                 )
             )
         ).one()
@@ -85,6 +87,9 @@ async def metrics(request: Request) -> dict[str, Any]:
             "synthesis": {"input": syn_in, "output": syn_out},
             "total": plan_in + plan_out + step_in + step_out + syn_in + syn_out,
         },
+        # Billed apart from tokens. grounded_calls is held to the per-task limit; queries are
+        # what the provider reported afterwards (llm/grounding.py).
+        "search": {"grounded_calls": grounded_calls, "queries": search_queries},
         "background_jobs_running": getattr(runner, "running", None),
         "llm": request.app.state.llm_info,
         "uptime_seconds": round(time.monotonic() - request.app.state.started_monotonic, 1),

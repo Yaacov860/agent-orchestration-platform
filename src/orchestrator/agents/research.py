@@ -4,14 +4,18 @@ from typing import ClassVar
 
 from orchestrator.agents.base import BaseAgent
 from orchestrator.agents.prompted import InvalidAgentOutputError
-from orchestrator.agents.types import AgentOutput, AgentTask
-from orchestrator.llm import LLMClient, LLMRequest, LLMTransientError, Source
+from orchestrator.agents.types import AgentOutput, AgentTask, Grounding
+from orchestrator.llm import GroundingReport, LLMClient, LLMRequest, LLMTransientError, Source
 
+# The search instructions below are guidance for the model, not a limit: the model decides how
+# many queries a grounded call runs. The hard limit is on grounded calls (llm/grounding.py).
 RESEARCH_SYSTEM_PROMPT = """\
 You are the research agent in a multi-agent pipeline. Another agent will turn your findings
 into the final text, so deliver facts, not polished prose.
 
 - Use web search if it is available to you, and base every factual claim on what you find.
+- Keep it light: this is quick research on one step, not a survey. Run only the few focused
+  queries this step needs, and stop when you have enough to answer it.
 - If no search is available, answer from what you know and start with the line
   "Unverified: no web search was available"; never write tool or function calls as text.
 - Do not write URLs or a reference list: the sources you used are collected automatically.
@@ -63,11 +67,46 @@ class ResearchAgent(BaseAgent):
             )
 
         sources = _unique_by_url(response.sources)
+        if not searching:
+            return AgentOutput(content=content, sources=sources, confidence=None)
+        grounding = _grounding(response.grounding, sources)
+        if response.grounding is not None and not response.grounding.used:
+            # Known for certain that no search ran: say so in the text itself, in code's words
+            # (the model was never told why it had no search, so its own line may be wrong).
+            content = _label_unverified(content, grounding.reason)
         return AgentOutput(
             content=content,
             sources=sources,
-            confidence=_evidence_confidence(len(sources)) if searching else None,
+            confidence=_evidence_confidence(len(sources)),
+            grounding=grounding,
         )
+
+
+NO_PAGES = "web search was available but returned no pages to cite"
+NOT_REPORTED = "the provider did not report web search, and returned no pages to cite"
+
+
+def _grounding(report: GroundingReport | None, sources: tuple[Source, ...]) -> Grounding:
+    """Verified means: the provider ran search for this answer and returned the pages."""
+    queries = report.queries if report is not None else ()
+    if report is not None and not report.used:
+        return Grounding(status="unverified", reason=report.reason)
+    if sources:
+        return Grounding(status="grounded", search_queries=queries)
+    return Grounding(
+        status="unverified",
+        reason=NO_PAGES if report is not None else NOT_REPORTED,
+        search_queries=queries,
+    )
+
+
+_UNVERIFIED_LINE = re.compile(r"\A\s*unverified\b[^\n]*\n*", re.IGNORECASE)
+
+
+def _label_unverified(content: str, reason: str | None) -> str:
+    body = _UNVERIFIED_LINE.sub("", content, count=1).strip() or content
+    why = reason or "no web search ran"
+    return f"Unverified: {why}. These findings come from the model, not from web search.\n\n{body}"
 
 
 def _unique_by_url(sources: tuple[Source, ...]) -> tuple[Source, ...]:

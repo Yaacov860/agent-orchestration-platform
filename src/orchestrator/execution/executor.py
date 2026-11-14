@@ -31,6 +31,7 @@ from orchestrator.execution.types import (
     StepSpec,
 )
 from orchestrator.llm.errors import retry_wait
+from orchestrator.llm.grounding import GroundingBudget, SearchUsage, StepGrounding
 from orchestrator.llm.types import TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,10 @@ class DependencyExecutor:
         max_context_chars: int = MAX_CONTEXT_CHARS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Clock = utc_now,
+        max_grounded_calls: int | None = None,
     ) -> None:
+        """`max_grounded_calls`: provider calls with web search attached, per task, over all
+        its steps, attempts and model fallbacks (llm/grounding.py). None: no limit here."""
         self._agents = agents
         self._slots = slots
         self._retry_delays = tuple(retry_delays)
@@ -67,6 +71,7 @@ class DependencyExecutor:
         self._max_context_chars = max_context_chars
         self._sleep = sleep
         self._clock = clock
+        self._max_grounded_calls = max_grounded_calls
 
     async def run(
         self, job: ExecutionJob, recorder: StepRecorder, cancel: asyncio.Event
@@ -76,6 +81,8 @@ class DependencyExecutor:
         skipped: dict[str, str] = {}
         cancelled: list[str] = []
         expired: list[str] = []
+        # One budget per task execution, shared by every step, parallel ones included.
+        budget = GroundingBudget(self._max_grounded_calls)
 
         for index, group in enumerate(job.parallel_groups):
             rest = [step_id for later in job.parallel_groups[index:] for step_id in later]
@@ -114,7 +121,9 @@ class DependencyExecutor:
             # siblings are cancelled instead of running on, orphaned, after the task failed.
             async with asyncio.TaskGroup() as group_tasks:
                 running = [
-                    group_tasks.create_task(self._run_step(job, step, done, recorder, cancel))
+                    group_tasks.create_task(
+                        self._run_step(job, step, done, recorder, cancel, budget)
+                    )
                     for step in runnable
                 ]
             for outcome in (r.result() for r in running):
@@ -140,7 +149,9 @@ class DependencyExecutor:
         done: Mapping[str, StepOutcome],
         recorder: StepRecorder,
         cancel: asyncio.Event,
+        budget: GroundingBudget,
     ) -> StepOutcome:
+        grounding = budget.for_step(step.step_id)
         try:
             agent = self._agents.get(step.agent)
         except UnknownAgentError as exc:
@@ -174,7 +185,7 @@ class DependencyExecutor:
                     break
                 attempts += 1
                 await recorder.step_started(step.step_id, attempts)
-                result = await self._attempt(agent, task, cancel, remaining)
+                result = await self._attempt(agent, task, cancel, remaining, grounding)
             if result is None:  # cancelled while running
                 break
             usage = usage + result.usage
@@ -210,7 +221,14 @@ class DependencyExecutor:
 
         if result is None:
             return await self._finish(
-                recorder, step, agent.name, "cancelled", attempts, usage, elapsed_ms
+                recorder,
+                step,
+                agent.name,
+                "cancelled",
+                attempts,
+                usage,
+                elapsed_ms,
+                search=grounding.usage,
             )
         return await self._finish(
             recorder,
@@ -222,6 +240,7 @@ class DependencyExecutor:
             elapsed_ms,
             output=result.output,
             error=result.error,
+            search=grounding.usage,
         )
 
     async def _finish(
@@ -236,6 +255,7 @@ class DependencyExecutor:
         *,
         output: AgentOutput | None = None,
         error: ErrorInfo | None = None,
+        search: SearchUsage | None = None,
     ) -> StepOutcome:
         outcome = StepOutcome(
             step_id=step.step_id,
@@ -246,6 +266,7 @@ class DependencyExecutor:
             execution_time_ms=elapsed_ms,
             output=output,
             error=error,
+            search=search or SearchUsage(),
         )
         await recorder.step_finished(outcome)
         return outcome
@@ -256,6 +277,7 @@ class DependencyExecutor:
         task: AgentTask,
         cancel: asyncio.Event,
         remaining: float | None,
+        grounding: StepGrounding,
     ) -> AgentResult | None:
         """One run of the agent; None if the task was cancelled meanwhile.
 
@@ -266,7 +288,9 @@ class DependencyExecutor:
         by_deadline = remaining is not None and remaining < self._step_timeout
         limit = remaining if remaining is not None and by_deadline else self._step_timeout
         started = time.perf_counter()
-        run = asyncio.create_task(agent.run(task), name=f"agent:{task.step_id}")
+        run = asyncio.create_task(
+            agent.run(task, grounding=grounding), name=f"agent:{task.step_id}"
+        )
         stop = asyncio.create_task(cancel.wait())
         try:
             async with asyncio.timeout(limit):

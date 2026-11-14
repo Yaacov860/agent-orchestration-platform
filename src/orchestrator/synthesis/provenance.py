@@ -114,6 +114,13 @@ def step_limitations(
             )
         else:
             notes.append(f"{step.step_id} ({step.agent}: {step.action}) produced no output: {why}.")
+    for step in synthesis_input.usable_steps:
+        if step.grounding_status == "unverified":
+            notes.append(
+                f"{step.step_id} ({step.agent}: {step.action}) is unverified: "
+                f"{step.grounding_reason or 'no web search ran'}. Its findings come from the "
+                "model, not from cited pages."
+            )
     for step_id in truncated:
         notes.append(
             f"{step_id}'s output was longer than {max_chars} characters and was cut "

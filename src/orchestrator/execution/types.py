@@ -12,6 +12,7 @@ from typing import Literal, Protocol
 from pydantic import JsonValue
 
 from orchestrator.agents.types import AgentOutput, ErrorInfo
+from orchestrator.llm.grounding import SearchUsage
 from orchestrator.llm.types import TokenUsage
 
 DEADLINE_EXCEEDED = "DeadlineExceeded"
@@ -52,6 +53,8 @@ class StepOutcome:
     execution_time_ms: int
     output: AgentOutput | None = None
     error: ErrorInfo | None = None
+    search: SearchUsage = field(default_factory=SearchUsage)
+    """Grounded calls and reported search queries of every attempt, failed ones included."""
 
 
 @dataclass(frozen=True)

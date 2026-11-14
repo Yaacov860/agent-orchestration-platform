@@ -25,9 +25,15 @@ class Settings(BaseSettings):
     """Comma-separated. Tried in order for a call when the model before them is overloaded
     (503/504). Both answered for this project's key on 2026-11-14 while gemini-3.8-flash
     returned 503; empty disables fallback."""
-    gemini_search_grounding: bool = True
-    """False for an account without Google Search grounding quota (429 "check your plan and
-    billing"): research steps then run without search and report no sources."""
+    gemini_search_grounding: bool = False
+    """Off by default: Google Search grounding is billed per search query and needs quota on
+    the key (a free-tier key has none: 429 "check your plan and billing"). Off, research steps
+    run without search, are labelled unverified and report no sources. On, only research
+    steps search, within GEMINI_MAX_GROUNDED_CALLS_PER_TASK."""
+    gemini_max_grounded_calls_per_task: int = Field(default=2, ge=0, le=50)
+    """A hard limit on provider calls sent with web search attached, per task, over all its
+    research steps, retries and model fallbacks (0: none at all). Not a limit on Google
+    queries: the model decides how many one call runs, and they are only counted afterwards."""
     gemini_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     """One HTTP call to Gemini. Below STEP_TIMEOUT_SECONDS, so a hung call fails as a provider
     timeout (and is retried) before the step timeout has to stop it."""

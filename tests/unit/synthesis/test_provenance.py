@@ -136,3 +136,24 @@ def test_limitations_are_merged_without_repeats() -> None:
 
 def test_a_url_in_a_step_output_is_never_turned_into_a_source() -> None:
     assert p.collect_sources([done("step_1", "see https://api.example.com/v1", sources=())]) == ()
+
+
+def test_an_unverified_research_step_is_named_in_the_limitations_with_its_reason() -> None:
+    from dataclasses import replace
+
+    unverified = replace(
+        done("step_1", "- from memory"),
+        grounding_status="unverified",
+        grounding_reason="the task's grounded-call budget is used up (2 of 2 calls)",
+    )
+    grounded = replace(
+        done("step_2", "- cited", sources=(PY,)),
+        grounding_status="grounded",
+    )
+
+    notes = p.step_limitations(evidence(unverified, grounded), truncated=[], max_chars=100)
+
+    assert notes == [
+        "step_1 (research: research) is unverified: the task's grounded-call budget is used up "
+        "(2 of 2 calls). Its findings come from the model, not from cited pages."
+    ]

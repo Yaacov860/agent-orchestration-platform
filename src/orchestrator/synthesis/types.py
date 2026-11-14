@@ -32,6 +32,10 @@ class StepEvidence:
     confidence: float | None = None
     error: str | None = None
     """Why a step has no output (failed or not run), in the executor's words."""
+    grounding_status: str | None = None
+    """Research steps: "grounded" or "unverified" (agents.types.Grounding). None otherwise."""
+    grounding_reason: str | None = None
+    """Why a research step is unverified, in code's words."""
 
     @property
     def usable(self) -> bool:

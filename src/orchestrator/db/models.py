@@ -133,6 +133,9 @@ class ExecutionStep(Base):
             "input_tokens >= 0 AND output_tokens >= 0 AND attempts >= 0",
             name="counters_non_negative",
         ),
+        CheckConstraint(
+            "grounded_calls >= 0 AND search_queries >= 0", name="search_counters_non_negative"
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -150,6 +153,12 @@ class ExecutionStep(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     output_tokens: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    grounded_calls: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    """Provider calls sent with web search attached, over every attempt: each one took a slot
+    of the task's grounded-call budget (llm/grounding.py)."""
+    search_queries: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    """Search queries the provider reported for those calls. Counted after the fact: a call
+    that failed reported none, so this can be lower than what was billed."""
     execution_time_ms: Mapped[int | None] = mapped_column(Integer)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

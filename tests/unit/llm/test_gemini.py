@@ -10,8 +10,17 @@ import httpx2
 import pytest
 from google.genai import errors, types
 
-from orchestrator.llm import LLMPermanentError, LLMRequest, LLMTransientError, Source
-from orchestrator.llm.gemini import GeminiLLM
+from orchestrator.llm import (
+    GroundingBudget,
+    GroundingReport,
+    LLMPermanentError,
+    LLMRequest,
+    LLMTransientError,
+    SearchUsage,
+    Source,
+    StepGrounding,
+)
+from orchestrator.llm.gemini import GROUNDING_DISABLED, GeminiLLM
 
 KEY = "AIza-test-secret-0123456789abcdef"
 REQUEST = LLMRequest(
@@ -67,9 +76,18 @@ class FakeModels:
         return item
 
 
-def gemini(*items: types.GenerateContentResponse | BaseException) -> tuple[GeminiLLM, FakeModels]:
+def gemini(
+    *items: types.GenerateContentResponse | BaseException, search_grounding: bool = False
+) -> tuple[GeminiLLM, FakeModels]:
     models = FakeModels(*items)
-    return GeminiLLM(api_key=KEY, model="gemini-test", timeout_seconds=30, models=models), models
+    llm = GeminiLLM(
+        api_key=KEY,
+        model="gemini-test",
+        timeout_seconds=30,
+        models=models,
+        search_grounding=search_grounding,
+    )
+    return llm, models
 
 
 def api_error(code: int, status: str, message: str) -> errors.APIError:
@@ -95,7 +113,7 @@ async def test_the_request_maps_onto_the_sdk_config() -> None:
 
 
 async def test_use_search_turns_on_google_search_grounding() -> None:
-    llm, models = gemini(response("hi"))
+    llm, models = gemini(response("hi"), search_grounding=True)
 
     await llm.generate(REQUEST.model_copy(update={"use_search": True}))
 
@@ -407,7 +425,7 @@ async def test_a_quota_429_stays_retryable_because_per_minute_limits_share_its_t
 
 
 async def test_a_search_429_points_to_the_grounding_switch() -> None:
-    llm, _ = gemini(api_error(429, "RESOURCE_EXHAUSTED", QUOTA_TEXT))
+    llm, _ = gemini(api_error(429, "RESOURCE_EXHAUSTED", QUOTA_TEXT), search_grounding=True)
 
     with pytest.raises(LLMTransientError) as caught:
         await llm.generate(REQUEST.model_copy(update={"use_search": True}))
@@ -582,3 +600,98 @@ async def test_with_grounding_off_search_requests_run_without_the_search_tool() 
 
     assert models.calls[0]["config"].tools is None
     assert result.sources == ()  # nothing grounded, so nothing claimed
+
+
+# --- bounded grounding (llm/grounding.py) ---------------------------------------------------
+
+
+def grounded_answer(text: str, *queries: str) -> types.GenerateContentResponse:
+    return response(
+        text,
+        grounding=types.GroundingMetadata(
+            web_search_queries=list(queries),
+            grounding_chunks=[
+                types.GroundingChunk(
+                    web=types.GroundingChunkWeb(uri="https://python.org", title="Python")
+                )
+            ],
+        ),
+    )
+
+
+def search_request(step: StepGrounding) -> LLMRequest:
+    return REQUEST.model_copy(update={"use_search": True, "grounding": step})
+
+
+async def test_a_grounded_call_reports_and_counts_the_queries_google_ran() -> None:
+    step = GroundingBudget(2).for_step("step_1")
+    llm, models = gemini(grounded_answer("hi", "python gil", "pep 703"), search_grounding=True)
+
+    result = await llm.generate(search_request(step))
+
+    assert models.calls[0]["config"].tools is not None
+    assert result.grounding == GroundingReport(used=True, queries=("python gil", "pep 703"))
+    assert result.sources == (Source(title="Python", url="https://python.org"),)
+    assert step.usage == SearchUsage(grounded_calls=1, queries=2)
+
+
+async def test_with_the_budget_used_up_the_call_goes_without_search_and_says_why() -> None:
+    step = GroundingBudget(0).for_step("step_1")
+    llm, models = gemini(response("from memory"), search_grounding=True)
+
+    result = await llm.generate(search_request(step))
+
+    assert models.calls[0]["config"].tools is None
+    assert result.grounding is not None and result.grounding.used is False
+    assert "grounded-call budget is used up" in (result.grounding.reason or "")
+    assert result.sources == ()
+    assert step.usage == SearchUsage()
+
+
+async def test_every_model_fallback_is_a_grounded_request_with_its_own_slot() -> None:
+    step = GroundingBudget(1).for_step("step_1")
+    models = FakeModels(api_error(503, "UNAVAILABLE", "overloaded"), response("from the fallback"))
+    llm = GeminiLLM(
+        api_key=KEY,
+        model="first",
+        fallback_models=["second"],
+        search_grounding=True,
+        models=models,
+    )
+
+    result = await llm.generate(search_request(step))
+
+    assert [call["model"] for call in models.calls] == ["first", "second"]
+    assert models.calls[0]["config"].tools is not None  # took the only slot
+    assert models.calls[1]["config"].tools is None  # none left for the fallback
+    assert result.grounding is not None and result.grounding.used is False
+    assert step.usage.grounded_calls == 1
+
+
+async def test_a_failed_grounded_call_still_used_its_slot() -> None:
+    step = GroundingBudget(2).for_step("step_1")
+    llm, _ = gemini(api_error(500, "INTERNAL", "boom"), search_grounding=True)
+
+    with pytest.raises(LLMTransientError):
+        await llm.generate(search_request(step))
+
+    # It may have searched and been billed; its queries are unknown, as it returned nothing.
+    assert step.usage == SearchUsage(grounded_calls=1, queries=0)
+
+
+async def test_with_grounding_off_no_slot_is_taken_and_the_switch_is_named() -> None:
+    step = GroundingBudget(2).for_step("step_1")
+    llm, models = gemini(response("x"))  # the default: off
+
+    result = await llm.generate(search_request(step))
+
+    assert models.calls[0]["config"].tools is None
+    assert result.grounding is not None and result.grounding.reason == GROUNDING_DISABLED
+    assert step.usage == SearchUsage()
+
+
+async def test_a_request_without_search_has_no_grounding_report() -> None:
+    llm, models = gemini(response("x"), search_grounding=True)
+
+    assert (await llm.generate(REQUEST)).grounding is None
+    assert models.calls[0]["config"].tools is None
