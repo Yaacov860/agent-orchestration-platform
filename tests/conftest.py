@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from fakes import ManualRunner
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import make_url, text
 from sqlalchemy.ext.asyncio import (
@@ -27,6 +28,7 @@ from sqlalchemy.ext.asyncio import (
 
 from orchestrator.config import Settings
 from orchestrator.db.session import create_sessionmaker
+from orchestrator.llm.fake import FakeLLM
 from orchestrator.main import create_app
 
 TEST_DATABASE_URL = os.environ.get(
@@ -104,9 +106,24 @@ def sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
 
 
 @pytest.fixture
-async def client(database_url: str, engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
-    """HTTP client wired to an app that uses the test database. `engine` truncates first."""
-    app = create_app(Settings(database_url=database_url))
+def llm() -> FakeLLM:
+    """The app's LLM in API tests. Empty: a test that lets planning run scripts it first."""
+    return FakeLLM()
+
+
+@pytest.fixture
+def runner() -> ManualRunner:
+    """The app's background runner in API tests: nothing runs until `await runner.run_all()`."""
+    return ManualRunner()
+
+
+@pytest.fixture
+async def client(
+    database_url: str, engine: AsyncEngine, llm: FakeLLM, runner: ManualRunner
+) -> AsyncIterator[AsyncClient]:
+    """HTTP client wired to an app that uses the test database. `engine` truncates first.
+    Lifespan events do not run under ASGITransport, so startup recovery is tested directly."""
+    app = create_app(Settings(database_url=database_url), llm=llm, runner=runner)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
     await app.state.engine.dispose()

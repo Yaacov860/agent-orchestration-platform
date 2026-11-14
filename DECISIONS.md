@@ -74,8 +74,11 @@ newest plan and computes the counts on every call, so they cannot drift from the
 The assignment's `current_step` is kept, but with parallel steps several run at once, so
 `running_steps` lists all of them.
 
-**`POST /tasks` returns `pending`, not `planning`** (the assignment's example), because nothing
-plans yet. The status moves to `planning` when planning actually starts.
+**`POST /tasks` returns `pending`, not `planning`** (the assignment's example): the response is
+sent before the background planner has claimed the task. The status then moves to `planning`,
+and to `planned` once a validated plan is stored. `planned` is a status of its own (migration
+0002) rather than "still `planning`" or "already `executing`": a stored plan that has not started
+running is a real, observable state, and either alternative would misreport it.
 
 **Validation at the edge.** Unknown top-level fields are rejected (a typo such as `constraint`
 would otherwise be silently dropped). Known constraints use strict types: lax mode would accept
@@ -99,7 +102,63 @@ migration is a frozen snapshot). Its downgrade refuses while `planned` rows exis
 silently rewriting them. A test inserts every `TaskStatus` value into the migrated database, so
 an enum member added without a migration fails in CI, not in production.
 
+## 0.3 Planning in the background
+
+**Three short transactions, none held across the LLM call.** (1) claim `pending -> planning` and
+commit at once, so pollers see `planning` immediately; (2) call the planner with no database
+connection held, since a model can think for tens of seconds and a pool is small; (3) store the
+plan, its steps and `planning -> planned` together, all or nothing. A test counts the
+`idle in transaction` connections while the fake model is "thinking": zero.
+
+**Every status change is a conditional UPDATE** (`WHERE status = <expected>`), so the check and
+the write cannot interleave. Two runners claiming one task: exactly one wins (tested with two
+concurrent planners and a single scripted reply). A plan that finishes after the task left
+`planning` (recovery failed it, later a cancel) is discarded, not attached to a dead task.
+
+**Our own runner, not FastAPI's `BackgroundTasks`.** The event loop keeps tasks only weakly, so
+something must hold a reference until a job ends; a crashed job must be logged, not lost; and
+shutdown must cancel what is running. `BackgroundRunner` does those three things, and the
+executor will reuse it. A job is a coroutine *factory*, so a runner that never runs it (a test
+double, or one shutting down) leaves no un-awaited coroutine behind.
+
+**Deterministic API tests.** With a real runner, a test reading the task right after `POST`
+races the planner. API tests inject a `ManualRunner` that records jobs until the test runs them;
+one end-to-end test uses the real `BackgroundRunner` and checks the rows `POST /tasks` produces.
+
+**Retries belong to the service, not the planner.** The planner only reports `retryable`, as
+agents do. The service retries a transient LLM failure twice (after 2 s, then 5 s) and never
+retries a permanent failure or an invalid plan; the delays are injected, so tests do not sleep.
+
+**What the client sees when planning fails** is `status: failed` with a readable `error`: the
+planner's problems, the LLM error, or `internal error during planning` for a bug on our side,
+whose details go only to the server log.
+
+**No provider configured.** Without a usable provider (`LLM_PROVIDER=none`, or `gemini` with no
+`GEMINI_API_KEY`, see 0.6) the app builds `UnconfiguredLLM`: the API runs and accepts tasks,
+and planning fails at once with a permanent, explicit error that says what to set. An unknown
+value is a `ValueError` at startup, not a surprise later. `fake` is not a provider:
+unscripted it can only fail; tests inject a scripted `FakeLLM` through `create_app` instead.
+
 ## 0.4 Synthesis, provenance and the final result
+
+**Why a `synthesizing` status (migration 0003).** Three reasons, each architectural. First,
+`completed` is now reachable only from `synthesizing` (`executing -> completed` was removed
+from `TASK_TRANSITIONS`), so the transition table itself guarantees no task is completed
+before its result exists. Second, pollers see what is actually happening. Third, recovery must
+tell "interrupted mid-execution" (failed) from "interrupted mid-synthesis" (re-run, below).
+
+**`tasks.failure_stage`** (`planning`, `execution`, `synthesis`) is set with every move to
+`failed`, and the repository refuses a `failed` without one, or a stage on any other status.
+`GET /result` can then tell "no result because execution failed" from "the steps ran, but
+synthesis failed" without parsing error text.
+
+**One result per task, written with `completed`.** `task_results` has `UNIQUE(task_id)`. The
+result is inserted in the same transaction as the conditional `synthesizing -> completed`
+UPDATE, which comes first: if the task was cancelled meanwhile, or another process already
+completed it, the UPDATE matches nothing and the transaction rolls back. A test makes the
+insert fail and checks the task is not completed. A mutation test removing the conditional
+check still found no duplicate in the two-process test, because the UNIQUE constraint caught
+it: two independent guards.
 
 **The model writes, code decides what a model would invent.** The model's draft is only
 `content`, `key_findings` (each with the `step_ids` it came from), `conflicts` (every side
@@ -135,6 +194,18 @@ counts as invalid.
 marker. Each is labelled with its agent, action, instruction and the steps it built on, so
 both the model and the provenance code know the lineage. Failed and skipped steps are listed
 as "without output (cannot be cited)".
+
+**Partial results complete.** If at least one step completed, the task goes on to synthesis
+even when others failed or were skipped. The result is `partial: true`, and `limitations`
+names what is missing. This replaces the earlier rule that any failed step failed the task: an
+answer that says what it lacks is more useful than no answer. With no completed step, the task
+fails at `execution` and synthesis never runs. Cancelled tasks and passed deadlines are never
+synthesized.
+
+**Bounded in time and in calls.** At most two model calls (one repair), two retries of a
+transient LLM error (2 s, 5 s), all inside `SYNTHESIS_TIMEOUT_SECONDS` (120 s) or the time left
+before the deadline, whichever is shorter. A cancel stops the synthesis call in this process at
+once, and in another process prevents the result from being stored.
 
 **Separation.** `synthesis/` is pure. It imports none of planning, execution, the database or
 the services, and gets the task and step rows as plain data (`SynthesisInput`). Execution hands
@@ -364,6 +435,12 @@ the prompt is cut: the stored output, and what `GET /tasks/{id}/steps` serves, s
 The limit is per input, so a step with many dependencies gets proportionally more. A per-step
 budget would be the next refinement.
 
+**Limits are configuration, bounded at startup.** Concurrency (plans and steps), step timeout,
+attempts, retry base delay and input size are `Settings` fields with ranges. An out-of-range
+value stops the app with the field named. Retry delays derive from the attempts and the base
+(x3 each time), so the defaults reproduce the earlier constants exactly, and a test keeps
+`Settings` and the services' own defaults from drifting apart.
+
 **One agent instance per agent, shared.** `AgentFactory` builds every agent once from
 `IMPLEMENTED_AGENTS`, the same list the planner's catalog reads, so the planner can only name
 agents the executor can run (a test compares the two). Sharing is safe because `BaseAgent`
@@ -379,5 +456,90 @@ would have let a step "complete" without ever running.
 cancelled instead of running on after the task has already been failed.
 
 ## 4. Failure Recovery
+
+**A failed step fails its dependents, not its neighbours.** Steps depending on it, directly or
+through others, become `skipped`, each naming the dependency that did not complete. Independent
+steps still run, so their results are kept for whatever comes next. The task then fails with a
+summary (`step_1 failed: content blocked; not run: step_3`).
+
+**Step retries.** An agent result says whether its failure is `retryable`. Retryable failures
+(rate limit, 5xx, empty answer, timeout) get two more attempts, after 1 s and then 3 s.
+Permanent ones (bad request, auth, blocked content, no provider) get none. `attempts` and the
+tokens of every attempt are stored. A step that does not finish within 180 s is stopped and
+counts as a retryable timeout, so a hung provider call cannot hold a slot forever.
+
+**Deadlines are enforced at every stage, with no new statuses.**
+- Passed before planning: the task fails at its claim, with no model call.
+- Reached during planning: the planner call, and any retries, run inside a timeout of the time
+  left, and the task fails `deadline passed during planning`.
+- Passed before execution: every step becomes `skipped` with `DeadlineExceeded`, and the task
+  fails `deadline passed before execution started`.
+- During execution, each attempt runs for at most `min(step timeout, time left)`. If the
+  deadline is the limit that fires, the step fails with `DeadlineExceeded` (not retryable:
+  there is no time to retry in), not with a step timeout. A retry whose wait would reach the
+  deadline is not started, and the original error stands. A step still waiting for a slot
+  never starts. Later groups are `skipped` with `DeadlineExceeded`.
+
+Completed steps keep their results. No timer task is involved: the deadline only narrows
+timeouts that already exist, so it cannot leak a background task. Time comes from one injected
+clock (`domain/clock.py`), shared by planning and execution without either importing the other.
+
+**Cancellation.** `POST /tasks/{id}/cancel` works on any unfinished task (`409` otherwise). The
+database is changed first, in one transaction: the task, and every step still waiting. Whatever
+is in flight then notices. A planner's late plan is discarded, because its
+`planning -> planned` move fails. An executor in this process is signalled and stops its running
+agents at once. An executor in another process sees the status before its next group and stops
+there. Only the agent call is ever interrupted, never a database write, so a step's final state
+is always recorded. Completed steps keep their results. A cancel that lands after the last step
+finished still wins: the final `executing -> completed` move is conditional.
+
+**Planning.** Covered in 0.3: transient LLM failures are retried, permanent ones and invalid plans
+are not, and every failure leaves `failed` with a readable `error`.
+
+**Startup recovery settles what the previous process left, by status.**
+- `planning`: a plan was in progress (a crash, a deploy) and its outcome is unknown. It becomes
+  `failed` with `interrupted: the server restarted while this task was being planned`: visible,
+  instead of hanging forever or silently starting over.
+- `pending`: planning never started (the process died between the `POST` commit and the
+  background job, or the job was still queued). Nothing was lost, so it is simply scheduled
+  again, oldest first. This is what would have happened without the restart.
+- `executing`: steps were running and their outcome is unknown. The task becomes `failed`
+  (`interrupted: ... being executed`), its running steps `failed` (`Interrupted`), and its
+  waiting steps `cancelled`. Steps that had completed keep their results.
+- `planned`: execution never started, so it is scheduled again.
+- `synthesizing`: synthesized again. Unlike planning and execution, re-running is safe and
+  cheap: the inputs are durable step rows and nothing is written before success. Two
+  processes doing it at once still store one result (tested). A synthesis that crashes
+  the process every time would be retried on every start: an accepted risk for now.
+- Everything else is left alone. Failing comes first, so the rescheduled jobs cannot race it.
+
+Shutdown cancels planning jobs and leaves their tasks for this recovery, instead of writing to
+the database while being cancelled. If the database is down at startup, recovery is logged and
+skipped and the app starts anyway, matching the 503-not-crash stance of requests.
+
+**Never planned twice.** A task can be scheduled more than once: by `POST`, by recovery, by
+recovery running in two processes. Safety does not depend on preventing that. The claim is a
+conditional `pending -> planning` UPDATE, so exactly one job wins and the others find the task no
+longer pending. Tests run two "processes" (own service, own runner) recovering the same backlog
+with one scripted reply per task: each task gets one LLM call and one plan. Within a process a
+task with a job already queued is not queued again, but that only saves a slot: removing it
+breaks no cross-process test.
+
+**At most 4 plans at once, and the queue stays `pending`.** A restart that finds a backlog (or a
+burst of submissions) would otherwise fire every LLM call at once and mostly collect rate-limit
+errors. The slot is taken *before* the claim, so a task waiting for one is still `pending`: if the
+process dies then, recovery reschedules it instead of failing work that never started. A test
+stops the runner with one task mid-plan and one queued: on the next start the first is failed
+and the second is planned.
+
+**Status changes follow one table.** `TASK_TRANSITIONS` lists every allowed move. `completed`,
+`failed` and `cancelled` are terminal, `pending` is never re-entered, and no status moves to
+itself, since a no-op "transition" would hide a double claim. The repository checks the table
+before sending SQL, so a wrong transition is a bug that fails loudly at the call site instead of
+an UPDATE that quietly matches nothing.
+
+**Limits.** Failing `planning` at startup assumes one API process: with several replicas, one
+starting up would fail plans another is still computing (a heartbeat or lease column would fix
+that). Rescheduling `pending` is safe with any number of processes.
 
 ## 5. One Thing I Would Do Differently With More Time
