@@ -23,6 +23,16 @@ async def test_raises_a_scripted_exception() -> None:
         await llm.generate(REQUEST)
 
 
+async def test_more_replies_can_be_scripted_after_construction() -> None:
+    llm = FakeLLM([fake_response("first")])
+    llm.add(fake_response("second"), LLMTransientError("third fails"))
+
+    assert (await llm.generate(REQUEST)).text == "first"
+    assert (await llm.generate(REQUEST)).text == "second"
+    with pytest.raises(LLMTransientError):
+        await llm.generate(REQUEST)
+
+
 async def test_fails_loudly_when_called_more_times_than_scripted() -> None:
     llm = FakeLLM([fake_response("only one")])
     await llm.generate(REQUEST)

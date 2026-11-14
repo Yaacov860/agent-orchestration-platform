@@ -23,6 +23,10 @@ class FakeLLM:
         self.calls: list[LLMRequest] = []
         """Every request received, in order, so tests can assert on what an agent sent."""
 
+    def add(self, *items: ScriptItem) -> None:
+        """Append to the script, for a FakeLLM already wired into an app by a fixture."""
+        self._script.extend(items)
+
     async def generate(self, request: LLMRequest) -> LLMResponse:
         self.calls.append(request)
         # A real suspension point, like a network call: lets other coroutines run meanwhile.

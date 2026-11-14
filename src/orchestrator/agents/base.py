@@ -2,6 +2,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import ClassVar, Literal
 
 from orchestrator.agents.types import AgentOutput, AgentResult, AgentTask, ErrorInfo
@@ -43,6 +44,21 @@ class BaseAgent(ABC):
     description: ClassVar[str]
     capabilities: ClassVar[frozenset[str]]
     """The actions this agent accepts; the planner may only assign these."""
+    searches_web: ClassVar[bool] = False
+    """Whether it asks the provider for web search (and so can return grounded sources)."""
+    action_descriptions: ClassVar[Mapping[str, str]] = {}
+    """What each action does, in a sentence the planner reads: it picks an agent by what a
+    step must do, not by the agent's name. When given, it must describe exactly the
+    capabilities (checked when the class is defined, so the two cannot drift apart)."""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        described = set(cls.action_descriptions)
+        if described and hasattr(cls, "capabilities") and described != set(cls.capabilities):
+            raise TypeError(
+                f"{cls.__name__}: action_descriptions {sorted(described)} do not match "
+                f"capabilities {sorted(cls.capabilities)}"
+            )
 
     def __init__(self, llm: LLMClient) -> None:
         self._llm = llm
@@ -59,7 +75,12 @@ class BaseAgent(ABC):
                 )
             output = await self.execute(task, meter)
         except LLMError as exc:
-            error = ErrorInfo(type=type(exc).__name__, message=str(exc), retryable=exc.retryable)
+            error = ErrorInfo(
+                type=type(exc).__name__,
+                message=str(exc),
+                retryable=exc.retryable,
+                retry_after_seconds=exc.retry_after,
+            )
         except Exception as exc:
             # Deliberately not BaseException: asyncio.CancelledError must propagate so that
             # cancelling a task actually stops it instead of being recorded as a step failure.

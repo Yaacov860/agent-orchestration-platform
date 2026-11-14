@@ -47,6 +47,8 @@ class ErrorInfo(BaseModel):
     type: str
     message: str
     retryable: bool
+    retry_after_seconds: float | None = None
+    """How long the provider asked to wait before a retry, when it said."""
 
 
 class AgentResult(BaseModel):

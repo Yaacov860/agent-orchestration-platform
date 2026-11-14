@@ -221,3 +221,34 @@ async def test_concurrent_runs_on_one_agent_instance_keep_separate_token_counts(
     )
 
     assert sorted([first.tokens_used, second.tokens_used]) == [1, 1000]
+
+
+# --- seen against the real API (2026-11-14) ----------------------------------------------
+
+
+async def test_a_tool_call_written_as_text_is_not_accepted_as_findings() -> None:
+    llm = FakeLLM([fake_response('fn:authoritative_search(query="PEP 703 timeline")')])
+
+    result = await ResearchAgent(llm).run(make_task())
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert (result.error.type, result.error.retryable) == ("InvalidAgentOutputError", True)
+
+
+async def test_real_findings_that_mention_a_function_are_still_findings() -> None:
+    llm = FakeLLM(
+        [fake_response("- `print()` is the first function beginners use\n- It is readable")]
+    )
+
+    result = await ResearchAgent(llm).run(make_task())
+
+    assert result.status == "completed"
+
+
+def test_the_research_prompt_covers_running_without_search() -> None:
+    from orchestrator.agents.research import RESEARCH_SYSTEM_PROMPT
+
+    assert "Use web search if it is available to you" in RESEARCH_SYSTEM_PROMPT
+    assert "Unverified: no web search was available" in RESEARCH_SYSTEM_PROMPT
+    assert "never write tool or function calls as text" in RESEARCH_SYSTEM_PROMPT

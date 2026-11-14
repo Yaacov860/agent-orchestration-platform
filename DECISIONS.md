@@ -99,6 +99,40 @@ migration is a frozen snapshot). Its downgrade refuses while `planned` rows exis
 silently rewriting them. A test inserts every `TaskStatus` value into the migrated database, so
 an enum member added without a migration fails in CI, not in production.
 
+## 0.5 Specialized agents: writing, analysis, code
+
+**Four agents, one contract.** Research (existing), writing (`write`, `rewrite`,
+`draft_email`), analysis (`analyze`, `compare`, `evaluate`) and code (`write_code`,
+`explain_code`, `review_code`, `fix_bug`). All four take an `AgentTask` and return the same
+`AgentResult`; tests check the shape is identical. All four run through `BaseAgent.run`, which
+does the action check, timing, token metering and error mapping, and build their prompt with
+`BaseAgent.compose_user_prompt`: the goal, the constraints, the outputs of this step's direct
+dependencies, and the instruction. Nothing in BaseAgent was duplicated or rewritten.
+
+**One small base for the three new ones.** Writing, analysis and code differ only in prompts,
+sampling and output checks, so `PromptedAgent` (one model call, a system prompt per action,
+shared rules appended) holds the common `execute`, and each agent only declares data:
+`system_prompts`, `temperature` (code 0.1 < analysis 0.2 < writing 0.7), `max_output_tokens`,
+`output_checks`. Research keeps its own `execute`: it searches, collects sources and derives
+an evidence-based confidence, which the others do not.
+
+**No search, no sources, no confidence outside research.** The three new agents never request
+web search, never return sources (even if a provider attached some to a non-search call), and
+report `confidence: null`. Sources and evidence therefore enter the system through exactly one
+door, and synthesis's provenance (0.4) needs no special cases.
+
+**Do not invent.** Every new agent's prompt says to work only from the goal, the constraints,
+the inputs and the step; to invent no facts, figures or sources; and to say when the inputs are
+not enough. Analysis must name the input each claim rests on and write "insufficient
+information" rather than guess. This is instruction, not enforcement: a model can still
+invent, and only research outputs are grounded (see AI_USAGE.md).
+
+**Code is text only.** The code agent has no tool to run code, touch files or act on a machine,
+and its prompt forbids claiming code was run or tested. `write_code` and `fix_bug` must return a
+fenced code block. An answer without one is an `InvalidAgentOutputError`, retryable like an
+empty answer, because a second sample usually complies. After the last attempt the step fails
+and its dependents are skipped.
+
 ## 1. Task Decomposition Strategy
 
 ## 2. Dependency Management
