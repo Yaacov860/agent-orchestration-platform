@@ -15,7 +15,7 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, TypeVar
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -251,7 +251,10 @@ class SynthesisService:
         return SynthesisRecoveryReport(rescheduled=pending)
 
 
-async def _unless_cancelled[T](work: Coroutine[Any, Any, T], cancel: asyncio.Event) -> T | None:
+_T = TypeVar("_T")
+
+
+async def _unless_cancelled(work: Coroutine[Any, Any, _T], cancel: asyncio.Event) -> _T | None:
     """Run `work`; None if the task is cancelled first (the work is then cancelled too)."""
     run = asyncio.ensure_future(work)
     stop = asyncio.create_task(cancel.wait())

@@ -8,12 +8,13 @@ An item is either a response to return or an exception to raise, so failure path
 import asyncio
 from collections import deque
 from collections.abc import Iterable
+from typing import TypeAlias
 
 from orchestrator.llm.grounding import GroundingReport, may_ground
 from orchestrator.llm.types import LLMRequest, LLMResponse, Source, TokenUsage
 
 # BaseException, not Exception, so a test can script asyncio.CancelledError too.
-type ScriptItem = LLMResponse | BaseException
+ScriptItem: TypeAlias = LLMResponse | BaseException
 
 SEARCH_OFF = "the fake provider was built without search"
 

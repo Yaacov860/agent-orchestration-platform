@@ -2,7 +2,8 @@
 
 ## 0. Foundations
 
-**Runtime:** Python 3.12, FastAPI, Pydantic v2, managed with `uv` (lockfile committed).
+**Runtime:** Python 3.11+ (the suite, `ruff` and `mypy --strict` pass on 3.11 and 3.12; the
+Docker image runs 3.12), FastAPI, Pydantic v2, managed with `uv` (lockfile committed).
 
 **Execution model:** asyncio inside the API process, not Celery/Redis. LLM calls are network-bound,
 which is exactly what asyncio handles well, and a separate broker would add a moving part without

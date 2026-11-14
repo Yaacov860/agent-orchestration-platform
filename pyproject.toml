@@ -3,7 +3,7 @@ name = "agent-orchestration-platform"
 version = "0.1.0"
 description = "Decomposes complex tasks into a DAG of steps, runs them on specialized LLM agents, and synthesizes the results."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "alembic>=1.20.1",
     "asyncpg>=0.32.0",
@@ -38,13 +38,13 @@ filterwarnings = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 strict = true
 mypy_path = ["src", "tests"]
 packages = ["orchestrator"]

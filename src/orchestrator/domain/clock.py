@@ -2,8 +2,9 @@
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import TypeAlias
 
-type Clock = Callable[[], datetime]
+Clock: TypeAlias = Callable[[], datetime]
 
 
 def utc_now() -> datetime:

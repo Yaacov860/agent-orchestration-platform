@@ -3,6 +3,7 @@
 import asyncio
 import re
 from collections.abc import Callable, Mapping
+from typing import TypeAlias
 
 from orchestrator.llm import LLMRequest, LLMResponse
 from orchestrator.llm.fake import fake_response
@@ -171,7 +172,7 @@ def caller_of(request: LLMRequest) -> str:
     return match[1].removesuffix(" agent").removesuffix(" stage")
 
 
-type Reply = str | LLMResponse | Exception | Callable[[LLMRequest], str | LLMResponse]
+Reply: TypeAlias = str | LLMResponse | Exception | Callable[[LLMRequest], str | LLMResponse]
 
 
 class ByCallerLLM:

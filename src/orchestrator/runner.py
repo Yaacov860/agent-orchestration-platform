@@ -10,11 +10,11 @@ on shutdown. The executor (stage 4) will run on the same runner.
 import asyncio
 import logging
 from collections.abc import Callable, Coroutine
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeAlias
 
 logger = logging.getLogger(__name__)
 
-type Job = Callable[[], Coroutine[Any, Any, None]]
+Job: TypeAlias = Callable[[], Coroutine[Any, Any, None]]
 """A job is a coroutine *factory*: nothing starts until the runner calls it, so a runner
 that never runs a job (a test double, or one shutting down) leaves no coroutine un-awaited."""
 

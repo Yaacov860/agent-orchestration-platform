@@ -10,7 +10,7 @@ from research steps, and nothing else may look as if it had them.
 """
 
 from collections.abc import Callable, Mapping
-from typing import ClassVar
+from typing import ClassVar, TypeAlias
 
 from orchestrator.agents.base import BaseAgent
 from orchestrator.agents.types import AgentOutput, AgentTask
@@ -22,7 +22,7 @@ class InvalidAgentOutputError(LLMTransientError):
     `write_code`, say). Retryable, like an empty answer: a second sample usually complies."""
 
 
-type OutputCheck = Callable[[str], str | None]
+OutputCheck: TypeAlias = Callable[[str], str | None]
 """Returns why the output is unusable, or None if it is fine."""
 
 SHARED_RULES = """
