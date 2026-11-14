@@ -93,6 +93,12 @@ tested from scratch every time; another test runs downgrade-to-base and back up.
 `alembic upgrade head` before starting uvicorn; with several replicas that belongs in a separate
 deploy step instead, to avoid concurrent migrations.
 
+**Adding a status means replacing a CHECK by hand.** Autogenerate does not detect CHECK changes,
+so 0002 is hand-written, with the status lists spelled out instead of read from the enum (a
+migration is a frozen snapshot). Its downgrade refuses while `planned` rows exist instead of
+silently rewriting them. A test inserts every `TaskStatus` value into the migrated database, so
+an enum member added without a migration fails in CI, not in production.
+
 ## 1. Task Decomposition Strategy
 
 ## 2. Dependency Management
