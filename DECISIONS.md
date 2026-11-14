@@ -133,9 +133,57 @@ fenced code block. An answer without one is an `InvalidAgentOutputError`, retrya
 empty answer, because a second sample usually complies. After the last attempt the step fails
 and its dependents are skipped.
 
+**The planner chooses by description, not by name.** Each agent declares
+`action_descriptions`: what each action produces and what it needs. The catalog passes them
+into the planner prompt, together with rules that are catalog-agnostic and name no agent
+(agents that gather no information need earlier steps as dependencies; gather facts first,
+produce the deliverable last). A test builds a planner from a writing-only catalog and checks
+that its prompt mentions no other agent. A class whose descriptions do not match its
+capabilities fails when it is defined. The model's routing is then checked like everything
+else: an action given to the wrong agent is a validation problem whose message lists what that
+agent can do, so the single repair attempt can re-route it.
+
 ## 1. Task Decomposition Strategy
 
+**The model proposes, the code decides.** The planner asks the LLM for a JSON plan; nothing it
+returns is trusted until `parse_plan` and `validate_plan` accept it. The goal is fenced in the
+prompt as user data, but the real protection is that validation, not the model, decides what runs.
+
+**One catalog, used twice.** `AgentCatalog` is built from the agent classes' own `name`,
+`description`, `capabilities` and `action_descriptions`, and contains only implemented agents
+(research, writing, analysis, code; see 0.5). The prompt lists exactly those agents and
+actions, and validation checks the answer against the same catalog, so the prompt can never
+offer what validation rejects. Adding an agent to `IMPLEMENTED_AGENTS` is all it takes to make
+it plannable, and runnable, since the executor's `AgentFactory` reads the same list.
+
+**Strict plan schema.** Unknown fields are errors (`dependecies` would otherwise drop the
+dependencies silently), step ids follow `step_<n>`, lengths match the database columns, and a
+plan has 1 to 8 steps. More steps mostly means a model over-splitting the task: more calls, cost
+and latency, not a better result.
+
+**All problems at once, then one repair.** Validation collects every problem, each naming the
+step and what is allowed instead (`unknown agent 'writing'; available agents: research`). If the
+first answer is invalid, the model gets its own answer back with that list, once. A model that
+cannot fix a plan when shown the exact problems rarely does on a third try, and each try is a
+full LLM call. Harmless sloppiness (a dependency listed twice) is normalized rather than sent back.
+
+**Holding a `ValidatedPlan` is proof.** Only `validate_plan` builds one, and only it carries the
+parallel groups, so later code never re-checks whether a plan is sound.
+
 ## 2. Dependency Management
+
+**Dependencies are declared, never inferred.** Each step lists the ids whose output it needs.
+
+**Parallel groups by Kahn's algorithm, level by level** (O(steps + dependencies)): group 0 is every
+step with no dependencies; each next group is every step whose dependencies are all in earlier
+groups. Within a group steps keep plan order, so the same plan always yields the same groups.
+
+**Cycles are reported as the cycle itself.** Steps that never reach zero waiting dependencies are
+stuck; walking back along stuck dependencies until a step repeats yields the actual loop
+(`step_2 -> step_3 -> step_2`), told apart from steps merely blocked behind it. Validation looks
+for cycles even when other edges are broken (those are reported already): with a single repair
+attempt, the model must see the cycle in the same round as everything else. Only duplicate step
+ids skip the check, since a dependency on a duplicated id has no single meaning.
 
 ## 3. Parallel Execution
 
