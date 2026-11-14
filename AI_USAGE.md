@@ -47,6 +47,17 @@ default (`GEMINI_MODEL`), for every caller. Without `GEMINI_API_KEY` the app bui
 >   then task_28f1a2c6490944198c35a931c9cf7a80, task_f2d68d0473c84ef0acff4db56cec023d,
 >   task_610a2fdaa872414181ed97c9aa7c1e3e (429 wrongly treated as permanent), then three
 >   failed at planning on a used-up daily quota before model fallback covered 429.
+> - **After billing was enabled on the key (2026-11-14): one more end-to-end task**, through
+>   the Docker image of the final code (`docker compose`, PostgreSQL in its container), sent
+>   with `POST /tasks` and polled to the end: `task_243afa2a37504ae7b62f36dedde32b19`,
+>   `completed`, not partial. The plan had three steps in two parallel groups (research and
+>   code, then writing); the planner, every step and the synthesis succeeded on the first
+>   attempt, with no retry and no fallback model. Tokens, as reported by Gemini: 8,018 in total,
+>   3,519 input and 4,499 output (planning 2,187, execution 3,678, synthesis 2,153).
+>   **Google Search grounding was disabled for this run** (`GEMINI_SEARCH_GROUNDING=false`):
+>   the research step ran without search, began with "Unverified: no web search was
+>   available", and returned no sources and confidence 0.3, and the result lists "no web
+>   sources" among its limitations. Grounded search therefore remains unverified live.
 >
 > _[author: with a key that has grounding quota, rerun `uv run pytest -m live tests/live -v`
 > and `uv run python scripts/gemini_e2e.py` with grounding on, and record the outcome.]_
@@ -189,6 +200,15 @@ Problems in AI-written code or tests, caught during review or by the checks:
 - **Type errors under `mypy --strict`** in tests: a `dict` inferred too loosely, an unused
   `type: ignore`, and indexing raw JSON. The last one was replaced by loading the stored JSON back
   into a `Plan`, which also proves what is stored is a valid plan.
+- **A runtime dependency declared only for development.** `llm/gemini.py` imports `httpx` to
+  map its timeouts and transport errors, but `httpx` was listed only in the `dev` dependency
+  group, where the tests use it as an HTTP client. The Docker image installs without dev
+  dependencies, so the API container exited at startup with
+  `ModuleNotFoundError: No module named 'httpx'`, whatever `LLM_PROVIDER` was, while all 541
+  tests passed in the development environment. Found by the final Docker validation. `httpx`
+  is now a runtime dependency (the same 0.28.1 in `uv.lock`), and `scripts/docker_smoke.sh`
+  checks that the container starts and answers `GET /health` with 200. It was run on the code
+  before the fix and failed with the same error.
 
 ## What AI Struggled With _[author to confirm]_
 

@@ -1,7 +1,5 @@
 # Design Decisions
 
-_Filled in as each part is built._
-
 ## 0. Foundations
 
 **Runtime:** Python 3.12, FastAPI, Pydantic v2, managed with `uv` (lockfile committed).

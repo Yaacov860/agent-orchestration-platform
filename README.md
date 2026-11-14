@@ -4,7 +4,8 @@ An API that takes a complex task, has a planner break it into a dependency graph
 runs each step on a specialized agent (research, writing, analysis, code), runs independent
 steps in parallel, and synthesizes the outputs into one result with provenance.
 
-> Work in progress. Built stage by stage; see `DECISIONS.md` for the reasoning behind each choice.
+See `DECISIONS.md` for the reasoning behind each choice, and `AI_USAGE.md` for how the system
+uses an LLM and how it was built with an AI assistant.
 
 ## Run
 
@@ -194,6 +195,8 @@ past the deadline is not started, and steps that never ran are `skipped` with
 | `SYNTHESIS_TIMEOUT_SECONDS` | 120 | the whole synthesis of one task, retries and repair included |
 
 An out-of-range value (`MAX_CONCURRENT_STEPS=0`, say) stops the app at startup, naming the field.
+`docker compose` forwards every setting in this table and in the Gemini table below from your
+shell or `.env`, with the same defaults (one exception: `GEMINI_SEARCH_GROUNDING`, below).
 
 **After a restart**, a task left `planning` or `executing` becomes `failed`
 (`interrupted: the server restarted ...`; completed steps keep their results), a task still
@@ -207,7 +210,7 @@ local `.env` (git-ignored; copy `.env.example`):
 
 ```bash
 export GEMINI_API_KEY=...          # personal Google AI Studio key; never logged or returned
-docker compose up --build          # compose passes GEMINI_API_KEY and GEMINI_MODEL through
+docker compose up --build          # compose forwards the key and the settings below
 ```
 
 | Setting (env) | Default | Meaning |
@@ -217,13 +220,13 @@ docker compose up --build          # compose passes GEMINI_API_KEY and GEMINI_MO
 | `GEMINI_MODEL` | `gemini-3.8-flash` | any Gemini text model your key can use |
 | `GEMINI_TIMEOUT_SECONDS` | 60 | one HTTP call to Gemini |
 | `GEMINI_FALLBACK_MODELS` | `gemini-3.6-flash,gemini-3.5-flash-lite` | tried in order for a call when the model before them is overloaded (503/504) or out of quota (429) |
-| `GEMINI_SEARCH_GROUNDING` | `true` | `false` for an account without Google Search grounding quota: research then runs without search and reports no sources |
+| `GEMINI_SEARCH_GROUNDING` | `true`; **`false` under `docker compose`** | Google Search grounding for research steps (no other agent searches). It needs Google Search quota on the key, so Compose leaves it off unless you set `GEMINI_SEARCH_GROUNDING=true`. Off: research runs without search, says so, and reports no sources |
 
 Without a key the app still starts: each task fails at planning with
 `no LLM provider is configured: LLM_PROVIDER=gemini but GEMINI_API_KEY is not set ...`. An
 unknown `LLM_PROVIDER`, a blank `GEMINI_MODEL` or an out-of-range timeout stops the app at
-startup. Research steps use Google Search grounding, and their `sources` are the pages
-Gemini reports it used. Rate limits, timeouts and 5xx are retried by the stages, waiting as
+startup. With grounding on, research steps use Google Search grounding, and their `sources`
+are the pages Gemini reports it used. Rate limits, timeouts and 5xx are retried by the stages, waiting as
 long as Gemini asks (up to 60 s); a rejected key, an unknown model, a blocked prompt, or a
 model whose daily quota is used up (once every fallback model is too) are not.
 
@@ -256,6 +259,19 @@ uv sync
 uv run pytest
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src tests scripts
+```
+
+A Docker smoke test checks the image itself: the tests above run in the development
+environment, which has packages the image does not install (a runtime dependency missing from
+the image was once found only this way). It builds the image, starts it next to a throwaway
+Postgres, and requires `GET /health` to answer 200, once with `LLM_PROVIDER=none` and once with
+`LLM_PROVIDER=gemini`, both without a key, so it never calls a model. It does not use
+`docker-compose.yml` or its ports, and removes everything it creates:
+
+```bash
+scripts/docker_smoke.sh                   # needs Docker; about 20 s with a warm build cache
+SMOKE_PORT=18010 scripts/docker_smoke.sh  # another loopback port (default 18000)
+SMOKE_NO_BUILD=1 scripts/docker_smoke.sh  # reuse an image built before (SMOKE_IMAGE)
 ```
 
 With a key (shell or `.env`), two more checks reach the real Gemini API. They are never part
