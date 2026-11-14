@@ -192,7 +192,7 @@ class ExecutionService:
         - the deadline passed: no time left to synthesize, so `failed`;
         - not a single step completed: nothing to synthesize from, so `failed`;
         - otherwise `synthesizing`, even if some steps failed or were skipped: the result
-          will be partial, and say what is missing (DECISIONS.md 5).
+          will be partial, and say what is missing (DECISIONS.md 0.4 and 4).
         """
         if summary.was_cancelled:
             logger.info("task %s cancelled; %d step(s) stopped", task_id, len(summary.cancelled))

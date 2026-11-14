@@ -454,6 +454,39 @@ from the model's text.
 300 words. The planner, not research, decides how many research steps a task has, and the
 budget caps how many of them may search.
 
+## 0.9 Context management across steps
+
+**What each agent sees.** Every step gets one prompt, built the same way for every agent
+(`BaseAgent.compose_user_prompt`). It holds the user's goal, the task's constraints, the
+outputs of the step's *direct* dependencies, and the step's instruction. Nothing else: not
+the whole plan, not the outputs of steps it does not depend on, not its own earlier attempts.
+A step gets more context only by declaring a dependency (2).
+
+**Size limits, in characters.**
+- Every dependency output passed into a prompt is cut to `MAX_CONTEXT_CHARS_PER_INPUT`:
+  8,000 characters by default, about 2,000 tokens.
+- The beginning is kept, and a visible marker says how much was left out. The stored output
+  stays complete (3).
+- Synthesis cuts each step's output the same way, and names every cut step in the result's
+  `limitations` (0.4).
+- Characters, not tokens, because no tokenizer is available for every provider. A fixed cut
+  keeps prompts predictable.
+
+**Bounds that keep every prompt finite.**
+- The goal is at most 4,000 characters.
+- A plan has at most 8 steps. Each step lists at most 20 dependencies, and its instruction is
+  at most 4,000 characters.
+- A repair prompt quotes the previous answer, cut to 8,000 characters.
+- Every call caps its answer: 2,048 output tokens for the planner, research and analysis, and
+  4,096 for writing, code and synthesis.
+
+**No automatic summarization.** Intermediate results are passed on as they are, cut but never
+condensed by a model in between. Summarizing exists as a step the planner can choose:
+research's `summarize` action condenses earlier outputs without adding facts. When it
+happens, it is in the plan, traced and paid for like any other step. The trade-off: a long
+output loses its end instead of being compressed. The marker tells the next model that text
+is missing, and the full output stays available at `/tasks/{id}/steps`.
+
 ## 1. Task Decomposition Strategy
 
 **The model proposes, the code decides.** The planner asks the LLM for a JSON plan; nothing it
@@ -557,10 +590,38 @@ cancelled instead of running on after the task has already been failed.
 
 ## 4. Failure Recovery
 
+**Approach chosen: retry, then skip. No re-planning.**
+- A step whose failure is transient is retried ("Step retries" below). A permanent failure,
+  or one still failing after the last attempt, is final for that step.
+- Its dependents are then skipped, independent steps carry on, and synthesis runs on what
+  completed. **Partial results** are described in 0.4, "Partial results complete": the
+  result says `partial: true` and names what is missing in `limitations`.
+- The task fails at `execution` only when no step completed, or when the deadline passed.
+
+The planner is not asked to re-plan after a step fails, for three reasons:
+1. **A new plan rarely fixes the cause.** Most step failures come from the provider: rate
+   limits, timeouts, 5xx, blocked content, a used-up quota, a missing key. A new plan would
+   send its steps to the same model with the same key. Retrying the step, waiting as long
+   as the provider asks, handles the transient failures. No new plan fixes the permanent
+   ones.
+2. **The rules for a re-plan do not exist yet.** Re-planning in the middle of execution
+   needs answers this design does not have: which completed steps a new plan may reuse,
+   how a new plan version maps onto steps that already ran, and how many times it may
+   happen before the task stops. Without them it risks loops, and unbounded cost: each
+   re-plan is another planner call plus new step calls.
+3. **A partial result is predictable.** A result that states what is missing is cheaper,
+   and easier to test, than an open-ended repair loop.
+
+The one repair loop in the system is the planner's own: an invalid plan is sent back once,
+with every problem listed (1). The data model leaves room for re-planning later: plans are
+versioned (0.2), so a re-plan would add a version, not edit one.
+
 **A failed step fails its dependents, not its neighbours.** Steps depending on it, directly or
 through others, become `skipped`, each naming the dependency that did not complete. Independent
-steps still run, so their results are kept for whatever comes next. The task then fails with a
-summary (`step_1 failed: content blocked; not run: step_3`).
+steps still run, so their results are kept for whatever comes next. If at least one step
+completed, the task goes on to synthesis with a partial result (0.4). If none did, it fails at
+`execution` with a summary
+(`no step produced a usable result: step_1 failed: content blocked; not run: step_3`).
 
 **Step retries.** An agent result says whether its failure is `retryable`. Retryable failures
 (rate limit, 5xx, empty answer, timeout) get two more attempts, after 1 s and then 3 s.
