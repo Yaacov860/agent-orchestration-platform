@@ -187,6 +187,52 @@ ids skip the check, since a dependency on a duplicated id has no single meaning.
 
 ## 3. Parallel Execution
 
+**Planning and execution meet only in the database.** Once a plan is committed, planning calls
+an injected `on_planned(task_id)`; the app wires it to `ExecutionService.schedule`. The executor
+reads the stored rows (steps, `parallel_groups`) and never imports the planning package, and
+planning never imports execution. An architecture test parses the source and fails on any such
+import. A plan stored by an older planner runs the same way as a fresh one.
+
+**Group by group.** The executor walks the plan's `parallel_groups`: every step of a group starts
+together, and the next group starts when the whole group has finished. Steps in a group never
+depend on each other, so running them at once is always safe. The cost: a step that is ready
+early still waits for its slowest group-mate. Scheduling each step the moment its own
+dependencies finish ("eager") would shorten the critical path. It was not chosen for now, since
+the groups are already validated, stored and visible, which makes progress easy to reason about.
+
+**One cap for the whole process.** At most 4 agent runs at once, across all tasks: the LLM's rate
+limit is shared by everything, so a per-task cap would still let ten tasks fire forty calls. A
+slot is held per attempt and released during the wait before a retry, so a step that is backing
+off does not block others. Tests hold calls "mid-thought" (a gated fake LLM) and check that two
+tasks with three parallel steps each never have more than 2 calls in flight, and that the
+database shows exactly 2 `running` rows at that moment.
+
+**Inputs flow along declared edges only.** A step gets the outputs of its *direct* dependencies,
+labelled by step and agent. What it needs from further back, it must declare.
+
+**Each input is cut to a set size, visibly.** One dependency's output is passed in up to
+`MAX_CONTEXT_CHARS_PER_INPUT` characters (8,000, about 2,000 tokens). The limit is counted in
+characters because no tokenizer is available for every provider. The beginning is kept, since
+agents put their findings first. The cut is marked (`[... truncated: N of M characters
+omitted]`) so the model knows text is missing rather than taking a fragment for the whole. Only
+the prompt is cut: the stored output, and what `GET /tasks/{id}/steps` serves, stays complete.
+The limit is per input, so a step with many dependencies gets proportionally more. A per-step
+budget would be the next refinement.
+
+**One agent instance per agent, shared.** `AgentFactory` builds every agent once from
+`IMPLEMENTED_AGENTS`, the same list the planner's catalog reads, so the planner can only name
+agents the executor can run (a test compares the two). Sharing is safe because `BaseAgent`
+meters each run separately.
+
+**No transaction is open while an agent runs.** Every state change (started, finished, skipped,
+cancelled) is its own short, conditional UPDATE, checked against `STEP_TRANSITIONS`. That table
+caught a real bug during development: finishing a step was allowed from `pending` too, which
+would have let a step "complete" without ever running.
+
+**A bug in one step does not orphan its siblings.** A group runs in an `asyncio.TaskGroup`, not
+`gather`: if a step raises (say, the database is gone), the other steps of the group are
+cancelled instead of running on after the task has already been failed.
+
 ## 4. Failure Recovery
 
 ## 5. One Thing I Would Do Differently With More Time
