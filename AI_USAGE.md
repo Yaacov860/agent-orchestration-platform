@@ -26,7 +26,7 @@ All three go through the same `LLMClient` contract and meter their tokens with `
 default (`GEMINI_MODEL`), for every caller. Without `GEMINI_API_KEY` the app builds
 `UnconfiguredLLM`: the API runs and tasks fail with a message saying the key is missing.
 
-> **Real API runs (2026-11-14, a free-tier key from `.env`).**
+> **Real API runs (2026-11-14, the key from `.env`: free tier at first, then with billing enabled).**
 >
 > - **End to end, through the API, succeeded:** `POST /tasks` -> planning -> agents ->
 >   synthesis -> `GET /tasks/{id}/result` (HTTP 200), with `GEMINI_SEARCH_GROUNDING=false`,
@@ -39,9 +39,10 @@ default (`GEMINI_MODEL`), for every caller. Without `GEMINI_API_KEY` the app bui
 > - **Live tests:** a plain request passed (real text and token counts), and a bad key was
 >   reported as an auth error without echoing it. The search-grounding test is skipped: this
 >   key has no grounding quota (instant 429 on every model).
-> - **Not verified against the real API:** grounded sources (no quota), and therefore
->   `corroborated` findings and evidence-based confidence above 0.3. Result quality was read
->   by eye on three tasks, not evaluated.
+> - **Not verified on that key:** grounded sources (no quota), and therefore
+>   evidence-based confidence above 0.3. Both were verified later, with billing enabled (the
+>   last item below). `corroborated` findings are still unverified live. Result quality was
+>   read by eye on three tasks, not evaluated.
 > - **Earlier failed runs, kept for the record:** task_30ba0792820548dab42ade68cd333db7,
 >   task_f9c997e11362458d932c04002220addf, task_03b1c78da69345c99b3d1a453a7300bd (503/504),
 >   then task_28f1a2c6490944198c35a931c9cf7a80, task_f2d68d0473c84ef0acff4db56cec023d,
@@ -57,10 +58,25 @@ default (`GEMINI_MODEL`), for every caller. Without `GEMINI_API_KEY` the app bui
 >   **Google Search grounding was disabled for this run** (`GEMINI_SEARCH_GROUNDING=false`):
 >   the research step ran without search, began with "Unverified: no web search was
 >   available", and returned no sources and confidence 0.3, and the result lists "no web
->   sources" among its limitations. Grounded search therefore remains unverified live.
->
-> _[author: with a key that has grounding quota, rerun `uv run pytest -m live tests/live -v`
-> and `uv run python scripts/gemini_e2e.py` with grounding on, and record the outcome.]_
+>   sources" among its limitations. Grounded search was verified in the next run.
+> - **With Google Search grounding on (2026-11-14, billing enabled, bounded grounding):**
+>   - **How it ran:** one end-to-end task through the Docker image of the final code, with
+>     `GEMINI_SEARCH_GROUNDING=true` and `GEMINI_MAX_GROUNDED_CALLS_PER_TASK=1`.
+>   - **Result:** `task_ac4108c471374a8e8217b47e8bfea101`, `completed`, not partial, in
+>     34.5 s. Planning took 4.9 s, execution 24.0 s and synthesis 5.6 s.
+>   - **Steps:** the plan had two steps in sequence, research then writing. Every call
+>     succeeded on its first attempt, with no retry and no fallback model.
+>   - **Tokens:** 5,769 in total, as reported by Gemini (2,716 input, 3,053 output).
+>   - **Grounding:** the research step made **1 grounded request**, the whole budget, and
+>     was marked `grounded`. It returned **5 sources** (Google grounding-redirect links,
+>     titled by domain), and its evidence-based confidence was 0.85. The writing step did not
+>     search.
+>   - **Queries:** Gemini reported **3 search queries** for that request. That is the
+>     provider's count, as recorded by the app. The number actually billed was not checked
+>     against Google's billing.
+>   - **What the result says:** both of its findings rest on that single research step and
+>     are labelled not corroborated.
+>   - **Not run with grounding on:** `tests/live` and `scripts/gemini_e2e.py`.
 
 **What the model is trusted with.** Nothing it returns is used unchecked. A plan is parsed with
 a strict schema and validated against the agent catalog and the dependency graph before it is
