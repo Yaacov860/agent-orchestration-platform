@@ -1,4 +1,5 @@
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -6,7 +7,9 @@ from fastapi import FastAPI
 
 from orchestrator.agents.catalog import AgentCatalog, default_catalog
 from orchestrator.agents.factory import AgentFactory
+from orchestrator.api.agents import router as agents_router
 from orchestrator.api.errors import DATABASE_UNAVAILABLE, register_error_handlers
+from orchestrator.api.monitoring import router as monitoring_router
 from orchestrator.api.tasks import router as tasks_router
 from orchestrator.config import Settings, get_settings
 from orchestrator.db.session import create_engine, create_sessionmaker
@@ -89,10 +92,14 @@ def create_app(
     app.state.execution = execution
     app.state.synthesis = synthesis
     app.state.cancellation = CancellationFanout(execution, synthesis)
+    app.state.catalog = catalog
     app.state.llm_info = describe_llm(llm)
+    app.state.started_monotonic = time.monotonic()
 
     register_error_handlers(app)
     app.include_router(tasks_router)
+    app.include_router(agents_router)
+    app.include_router(monitoring_router)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

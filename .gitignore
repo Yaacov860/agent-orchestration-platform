@@ -13,3 +13,6 @@ build/
 .DS_Store
 .idea/
 .vscode/
+
+# Output of scripts/gemini_e2e.py (real model answers; not committed)
+e2e-results/

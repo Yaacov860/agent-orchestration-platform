@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import InterfaceError, OperationalError
 
-from orchestrator.services.tasks import TaskNotFoundError
+from orchestrator.services.tasks import TaskNotCancellableError, TaskNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +15,10 @@ DATABASE_UNAVAILABLE = (OperationalError, InterfaceError, ConnectionError, Timeo
 
 async def _task_not_found(_: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+async def _task_not_cancellable(_: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
 
 
 async def _database_unavailable(_: Request, exc: Exception) -> JSONResponse:
@@ -28,5 +32,6 @@ async def _database_unavailable(_: Request, exc: Exception) -> JSONResponse:
 
 def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(TaskNotFoundError, _task_not_found)
+    app.add_exception_handler(TaskNotCancellableError, _task_not_cancellable)
     for error_type in DATABASE_UNAVAILABLE:
         app.add_exception_handler(error_type, _database_unavailable)

@@ -359,6 +359,38 @@ test forces a collection on a running loop and checks the connection is still op
 in `.env`; this was checked, not assumed. Live tests are opt-in, skip with a reason without a
 key, and the end-to-end script runs against a deployed API rather than inside the test suite.
 
+## 0.7 Observability: trace, token usage, monitoring
+
+**Every status change is an event, written with the change** (`task_events`, migration 0004).
+The repository inserts the event in the same transaction as the conditional status UPDATE,
+and only if the UPDATE matched. The trace can therefore never miss a change, nor show one
+that rolled back (both tested). Times come from `clock_timestamp()`, not `now()`: `now()` is
+the transaction's start, the same for every event of one transaction. A failed stage's event
+carries the tokens it spent, which nothing else records.
+
+**The trace is assembled, not logged twice.** `GET /tasks/{id}/trace` merges the task events
+with what the step rows already hold (start, end, attempts, tokens, time in the agent) and
+the result row, sorted by time, plus stage durations taken from the events. Steps that never
+started are listed separately with their reason (dependency not completed, deadline,
+cancel).
+
+**Token usage counts everything that was paid for.** Planning tokens, which used to be only
+logged, are stored on the plan row (`planner_input_tokens`, `planner_output_tokens`,
+`planner_attempts`), including rejected answers, repairs and retries. Usage by stage is:
+- planning: every plan row, plus failed planning events;
+- execution: every step of every plan, failed attempts included;
+- synthesis: the result row, plus failed synthesis events.
+
+It appears in `GET /tasks/{id}`, the trace and the result. The one gap left: a provider call
+that raised before returning reports no usage, so its tokens are unknown.
+
+**Monitoring is JSON, and readiness is separate from liveness.** `/health` says the process
+is up. `/health/ready` checks that the database answers and a provider is configured, and
+returns `503` otherwise, so an orchestrator can hold traffic. `/metrics` reports counts by
+status, tokens by stage, running background jobs and the provider, all from the database, so
+they cover every instance. It is a JSON snapshot, not Prometheus: no new dependency, and
+there is no metrics stack to scrape it yet.
+
 ## 1. Task Decomposition Strategy
 
 **The model proposes, the code decides.** The planner asks the LLM for a JSON plan; nothing it
@@ -440,6 +472,11 @@ attempts, retry base delay and input size are `Settings` fields with ranges. An 
 value stops the app with the field named. Retry delays derive from the attempts and the base
 (x3 each time), so the defaults reproduce the earlier constants exactly, and a test keeps
 `Settings` and the services' own defaults from drifting apart.
+
+**`GET /tasks/{id}/steps` serves the step rows as they are:** status, attempts, full output
+(content, grounded sources, confidence), error (type, message, retryable), tokens over all
+attempts, time spent in the agent, and start and end times, in plan order. Before a plan exists
+it returns an empty list rather than 404: the task exists, it just has no steps yet.
 
 **One agent instance per agent, shared.** `AgentFactory` builds every agent once from
 `IMPLEMENTED_AGENTS`, the same list the planner's catalog reads, so the planner can only name
